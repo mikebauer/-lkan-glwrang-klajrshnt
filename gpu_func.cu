@@ -5,6 +5,8 @@
 #include <iostream>
 #include "cublas_v2.h"
 
+#define BLOCK_SIZE (16)
+
 __global__
 void device_add_one(int* d_result, int t) {
     *d_result = t + 1;
@@ -32,12 +34,60 @@ int useless_gpu_add_one(int t) {
     return result;
 }
 
+/**
+ * \brief Kernel for in-place GEMM opration.
+ *
+ * See myGEMM for more details.
+ */
+__global__ void myGEMM_kernel(double *A, double *B, double *C,
+                              double alpha, double beta,
+                              int M, int N, int K)
+{
+    int row = blockIdx.x*blockDim.x + threadIdx.x;
+    int col = blockIdx.y*blockDim.y + threadIdx.y;
+
+
+    if ((row < M) && (col < N))
+    {
+        double product = 0;
+        double old_val = C[M*col + row];
+
+        for(int k = 0; k < K; k++)
+        {
+           product += A[k*M + row] * B[col*K + k];
+        }
+
+        C[M*col + row] = alpha*product + beta*old_val;
+    }
+
+}
+
 /*
-Routine to perform an in-place GEMM operation, i.e., C := alpha*A*B + beta*C
-*/
+ * \brief Routine to perform an in-place GEMM operation, i.e., C := alpha*A*B +
+ * beta*C. 
+ * 
+ * This function performs the in-place GEMM operation accelerated by the GPU.
+ * The arguments are as follows:
+ * 
+ * A is an MxK matrix of doubles in col-major format.
+ * B is an KxN matrix of doubles in col-major format.
+ * C is an MxN matrix of doubles in col-major format.
+ * alpha is the address of a scalar to multiply AB by before adding it to the
+ * final result.
+ * beta is the address of a scalar to multiply C by before adding alpha*AB to
+ * it.
+ *
+ * Note that A, B, and C are pointers to device memory whereas alpha and beta
+ * are pointers to host memory.
+ */
 int myGEMM(double* A, double* B, double* C, double* alpha, double* beta, int M,
            int N, int K) {
-    /* TODO: Write an efficient GEMM implementation on GPU */
 
-    return 1;
+    dim3 blockSize (BLOCK_SIZE, BLOCK_SIZE);
+    dim3 gridSize ((M + blockSize.x - 1)/blockSize.x,
+                   (N + blockSize.y - 1)/blockSize.y);
+
+    myGEMM_kernel<<<gridSize, blockSize>>>(A, B, C, *alpha, *beta, M, N, K);
+
+    return 0;
 }

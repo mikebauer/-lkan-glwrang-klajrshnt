@@ -39,4 +39,7 @@ clean:
 	rm -rf $(OBJDIR)/*.o main
 
 clear:
-	rm -rf  cme213.* 
+	rm -rf  cme213-*
+
+run: main
+	sbatch run.sh
