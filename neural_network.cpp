@@ -321,6 +321,7 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
              * 4. update local network coefficient at each node
              */
 
+
             if(print_every <= 0) {
                 print_flag = batch == 0;
             } else {

@@ -7,6 +7,23 @@
 
 #define BLOCK_SIZE (16)
 
+
+/*****************************************************************************\
+ * Section 1: Helper Structs                                                 *
+\*****************************************************************************/
+
+struct Identity
+{
+    __device__
+    static double func(double x) {return x;}
+};
+
+
+/*****************************************************************************\
+ * Section 2: General Functions                                              *
+\*****************************************************************************/
+
+
 __global__
 void device_add_one(int* d_result, int t) {
     *d_result = t + 1;
@@ -37,8 +54,13 @@ int useless_gpu_add_one(int t) {
 /**
  * \brief Kernel for in-place GEMM opration.
  *
- * See myGEMM for more details.
+ * See myGEMM for more details. We have used this Naive GEMM implementation for
+ * the time being. The operation PostOp::func is applied to each element in C
+ * after the product has been found. In some cases, the offset is not necessary
+ * so we use set the IncludeOffset to false so we do not have to waste a memory
+ * access to C.
  */
+template<class PostOp, bool IncludeOffset>
 __global__ void myGEMM_kernel(double *A, double *B, double *C,
                               double alpha, double beta,
                               int M, int N, int K)
@@ -50,16 +72,15 @@ __global__ void myGEMM_kernel(double *A, double *B, double *C,
     if ((row < M) && (col < N))
     {
         double product = 0;
-        double old_val = C[M*col + row];
+        double old_val = IncludeOffset ? C[M*col + row] : 0;
 
         for(int k = 0; k < K; k++)
         {
            product += A[k*M + row] * B[col*K + k];
         }
 
-        C[M*col + row] = alpha*product + beta*old_val;
+        C[M*col + row] = PostOp::func(alpha*product + beta*old_val);
     }
-
 }
 
 /*
@@ -87,7 +108,65 @@ int myGEMM(double* A, double* B, double* C, double* alpha, double* beta, int M,
     dim3 gridSize ((M + blockSize.x - 1)/blockSize.x,
                    (N + blockSize.y - 1)/blockSize.y);
 
-    myGEMM_kernel<<<gridSize, blockSize>>>(A, B, C, *alpha, *beta, M, N, K);
+    myGEMM_kernel<Identity, true><<<gridSize, blockSize>>>(
+        A, B, C, *alpha, *beta, M, N, K);
+
+    check_launch("myGEMM_kernel");
 
     return 0;
 }
+
+
+/**
+ * \brief Kernel for myTranspose.
+ */
+void myTranspose_kernel(double *A, double *AT, int M, int N)
+{
+    // TODO
+}
+
+
+/**
+ * \brief Efficient transpose of an MxN col-major matrix in device memory.
+ * 
+ * Arguments are as follows:
+ * A:  A device pointer pointing to the row-major matrix to be transposed.
+ * AT: A device pointer pointing to memory where A Transpose will be stored.
+ * M:  The number of rows in A
+ * N:  The number of columns in A
+ */
+int myTranspose(double *A, double *AT, int M, int N)
+{
+    // TODO
+}
+
+
+
+void mySpecialHadamard_kernel(double *dA1, double *A1, double *dZ1, 
+                              int M, int N) {
+    // TODO
+}
+
+
+/**
+ * \brief Function for carrying out the special Hadamard product present in our
+ * back propogation process.
+ *
+ * Arguments are as follows:
+ * dA1: The Jacobian of the objective function with respect to A1.
+ * A1:  The matrix A1 cached from the feed forward process.
+ * dZ1: Space where we can store the Jacobian of the objective function with
+ *      respect to Z1 (i.e. our result).
+ * M:   The number of rows in all of these matrices.
+ * N:   The number of columns in all of these matrices.
+ */
+int mySpecialHadamard(double *dA1, double *A1, double *dZ1, int M, int N)
+{
+    // TODO
+}
+
+
+
+
+
+
