@@ -279,6 +279,8 @@ void train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
     }
 }
 
+
+
 /*
  * TODO
  * Train the neural network &nn of rank 0 in parallel. Your MPI implementation
@@ -299,6 +301,19 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
     std::ofstream error_file;
     error_file.open("Outputs/CpuGpuDiff.txt");
     int print_flag = 0;
+
+/******************************************************************************/
+// Single Proc Implementation
+
+    int K = nn.H[0];
+    int M = nn.H[1];
+    // N already defined
+    int L = nn.H[2];
+
+    deviceCache dCache (X.memptr(), y.memptr(), K, L, M, N, batch_size);
+
+/******************************************************************************/
+
 
     /* HINT: You can obtain a raw pointer to the memory used by Armadillo Matrices
        for storing elements in a column major way. Or you can allocate your own array
@@ -321,6 +336,89 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
              * 4. update local network coefficient at each node
              */
 
+/******************************************************************************/
+// Single Proc Implementation
+
+
+             
+
+            int last_col = std::min((batch + 1)*batch_size-1, N-1);
+            arma::mat X_batch = X.cols(batch * batch_size, last_col);
+            arma::mat y_batch = y.cols(batch * batch_size, last_col);
+
+            int N_local = last_col - batch*batch_size + 1;
+
+            double *dX_batch = dCache.X + batch*batch_size*K;
+
+            checkCudaErrors(
+                cudaMemcpy(dCache.W1, nn.W[0].memptr(), sizeof(double) * M * K,
+                cudaMemcpyHostToDevice)); 
+            checkCudaErrors(
+                cudaMemcpy(dCache.b1, nn.b[0].memptr(), sizeof(double) * M,
+                cudaMemcpyHostToDevice)); 
+            checkCudaErrors(
+                cudaMemcpy(dCache.W2, nn.W[1].memptr(), sizeof(double) * L * M,
+                cudaMemcpyHostToDevice)); 
+            checkCudaErrors(
+                cudaMemcpy(dCache.b2, nn.b[1].memptr(), sizeof(double) * L,
+                cudaMemcpyHostToDevice)); 
+
+            struct cache bpcache;
+
+
+            myFeedForward(dCache, dX_batch, N_local); 
+
+            // Get A1 and A2 back into host memory
+            bpcache.a.resize(2);
+            arma::mat a1 (M, N_local, arma::fill::zeros);
+            checkCudaErrors(
+                cudaMemcpy(a1.memptr(), dCache.A1, sizeof(double)*M*N_local,
+                cudaMemcpyDeviceToHost));
+            bpcache.a[0] = a1;
+
+            arma::mat a2 (L, N_local, arma::fill::zeros);
+            checkCudaErrors(
+                cudaMemcpy(a2.memptr(), dCache.A2, sizeof(double)*L*N_local,
+                cudaMemcpyDeviceToHost));
+            bpcache.a[1] = a2;
+            bpcache.yc   = a2;
+            bpcache.X = X_batch;
+
+            //if(M != 20)
+            //{
+            //    std::cout << "Ur Wrong" << std ::endl;
+            //    exit(1);
+            //}
+
+            //if((batch == 0) && (epoch == 0))
+            //{
+            //    std::cout << std::endl;
+            //    for(int i = 0; i < M; i++)
+            //        std::cout << a1(i, 0) << std::endl;
+            //}
+
+            //feedforward(nn, X_batch, bpcache);
+
+            //if((batch == 0) && (epoch == 0))
+            //{
+            //    std::cout << std::endl;
+            //    for(int i = 0; i < M; i++)
+            //        std::cout << bpcache.a[0](i, 0) << std::endl;
+            //}
+
+            struct grads bpgrads;
+            backprop(nn, y_batch, reg, bpcache, bpgrads);
+
+            // Gradient descent step
+            for(int i = 0; i < nn.W.size(); ++i) {
+                nn.W[i] -= learning_rate * bpgrads.dW[i];
+            }
+
+            for(int i = 0; i < nn.b.size(); ++i) {
+                nn.b[i] -= learning_rate * bpgrads.db[i];
+            }
+
+/******************************************************************************/
 
             if(print_every <= 0) {
                 print_flag = batch == 0;
@@ -328,8 +426,8 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
                 print_flag = iter % print_every == 0;
             }
 
-            /* Following debug routine assumes that you have already updated the arma
-               matrices in the NeuralNetwork nn.  */
+            /* Following debug routine assumes that you have already updated the
+             * arma matrices in the NeuralNetwork nn.  */
             if(debug && rank == 0 && print_flag) {
                 write_diff_gpu_cpu(nn, iter, error_file);
             }

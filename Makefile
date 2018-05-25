@@ -41,5 +41,5 @@ clean:
 clear:
 	rm -rf  cme213-*
 
-run: main
+run:
 	sbatch run.sh

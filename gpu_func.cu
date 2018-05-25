@@ -8,9 +8,9 @@
 #define BLOCK_SIZE (16)
 
 
-/*****************************************************************************\
- * Section 1: Helper Structs                                                 *
-\*****************************************************************************/
+/******************************************************************************\
+ * Section 1: Helper Structs                                                  *
+\******************************************************************************/
 
 struct Identity
 {
@@ -18,10 +18,16 @@ struct Identity
     static double func(double x) {return x;}
 };
 
+struct Sigmoid
+{
+    __device__
+    static double func(double x){return 1 / (1 + exp(-x));}
+};
 
-/*****************************************************************************\
- * Section 2: General Functions                                              *
-\*****************************************************************************/
+
+/******************************************************************************\
+ * Section 2: General Functions                                               *
+\******************************************************************************/
 
 
 __global__
@@ -60,7 +66,7 @@ int useless_gpu_add_one(int t) {
  * so we use set the IncludeOffset to false so we do not have to waste a memory
  * access to C.
  */
-template<class PostOp, bool IncludeOffset>
+template<class PostOp, bool IncludeOffset, bool TransposeA, bool TransposeB>
 __global__ void myGEMM_kernel(double *A, double *B, double *C,
                               double alpha, double beta,
                               int M, int N, int K)
@@ -73,10 +79,13 @@ __global__ void myGEMM_kernel(double *A, double *B, double *C,
     {
         double product = 0;
         double old_val = IncludeOffset ? C[M*col + row] : 0;
+        double Apart, Bpart;
 
         for(int k = 0; k < K; k++)
         {
-           product += A[k*M + row] * B[col*K + k];
+           Apart = (TransposeA ? A[row*K + k] : A[k*M + row]);
+           Bpart = (TransposeB ? B[k*N + col] : B[col*K + k]);
+           product += Apart * Bpart;
         }
 
         C[M*col + row] = PostOp::func(alpha*product + beta*old_val);
@@ -108,7 +117,7 @@ int myGEMM(double* A, double* B, double* C, double* alpha, double* beta, int M,
     dim3 gridSize ((M + blockSize.x - 1)/blockSize.x,
                    (N + blockSize.y - 1)/blockSize.y);
 
-    myGEMM_kernel<Identity, true><<<gridSize, blockSize>>>(
+    myGEMM_kernel<Identity, true, false, false><<<gridSize, blockSize>>>(
         A, B, C, *alpha, *beta, M, N, K);
 
     check_launch("myGEMM_kernel");
@@ -117,40 +126,251 @@ int myGEMM(double* A, double* B, double* C, double* alpha, double* beta, int M,
 }
 
 
+/******************************************************************************\
+ * Section 3: Feed Forward Special Functions                                  *
+\******************************************************************************/
+
+
 /**
- * \brief Kernel for myTranspose.
+ * \brief Kernel for Matrix multiplication with vector accumulator.
+ *
+ * See myFeedForward for more details. We have used this Naive implementation
+ * for the time being. The operation PostOp::func is applied to each element in
+ * C after the product has been found. In some cases, the offset is not
+ * necessary so we use set the IncludeOffset to false so we do not have to waste
+ * a memory access to C.
  */
-void myTranspose_kernel(double *A, double *AT, int M, int N)
+template<class PostOp>
+__global__ void GEMM_vector_kernel(double *A, double *B, double *C, double *v,
+                                   int M, int N, int K)
 {
-    // TODO
+    int row = blockIdx.x*blockDim.x + threadIdx.x;
+    int col = blockIdx.y*blockDim.y + threadIdx.y;
+
+
+    if ((row < M) && (col < N))
+    {
+        double product = 0;
+        double old_val = v[row];
+
+        for(int k = 0; k < K; k++)
+        {
+           product += A[k*M + row] * B[col*K + k];
+        }
+
+        C[M*col + row] = PostOp::func(product + old_val);
+    }
 }
 
 
 /**
- * \brief Efficient transpose of an MxN col-major matrix in device memory.
+ * \brief Kernel for finding the softmax
+ *
+ * Although there's likely a smarter algorithm than this, we know that the
+ * matrix we will be processing only has 10 rows for this use case, so we can
+ * have a thread iterate through each row without too much of an issue.
+ *
+ * Furthermore, we store our results back in Z2 because we no longer need Z2
+ * after we take the softmax, only yhat is neccesary in future steps.
+ *
+ * Z2 has L rows and N columns.
+ *
+ */
+__global__ void softmax_kernel(double *Z2, int L, int N)
+{
+    int col = blockIdx.x*blockDim.x + threadIdx.x;
+
+    if (col < N)
+    {
+        double sum = 0;
+        for(int i = 0; i < L; i++)
+            sum += exp(Z2[col*L + i]);
+
+        for(int i = 0; i < L; i++)
+            Z2[col*L + i] = exp(Z2[col*L + i]) / sum;
+    }
+}
+
+
+
+/*
+ * \brief Routine to perform Matrix multiplication with a vector-valued
+ * accumulator (instead of the Matrix-valued accumulator in GEMM). 
  * 
- * Arguments are as follows:
- * A:  A device pointer pointing to the row-major matrix to be transposed.
- * AT: A device pointer pointing to memory where A Transpose will be stored.
- * M:  The number of rows in A
- * N:  The number of columns in A
+ *  TODO Fix these comments
+ *
+ * Note that A, B, C, and v are pointers to device memory
  */
-int myTranspose(double *A, double *AT, int M, int N)
+int myFeedForward(deviceCache &d, double* X, int N)
 {
-    // TODO
+    double *A1 = d.A1;
+    double *W1 = d.W1;
+    double *b1 = d.b1;
+
+    double *A2 = d.A2;
+    double *W2 = d.W2;
+    double *b2 = d.b2;
+
+    int K = d.K;
+    int L = d.L;
+    int M = d.M;
+
+    // Step 1: First layer. We want to compute A1 which is M by N
+    dim3 blockSize (BLOCK_SIZE, BLOCK_SIZE);
+    dim3 gridSize ((M + blockSize.x - 1)/blockSize.x,
+                   (N + blockSize.y - 1)/blockSize.y);
+
+    // Use our vector-accumulating GEM to compute A1
+    GEMM_vector_kernel<Sigmoid><<<gridSize, blockSize>>>(
+        W1, X, A1, b1, M, N, K);
+
+    check_launch("GEMM_vector_kernel layer1");
+
+    // Step 2a: Second layer. We want to compute A2. We start by storing Z2 in
+    // the space of A2
+    gridSize.x = (L + blockSize.x - 1)/blockSize.x;  
+    gridSize.y = (N + blockSize.y - 1)/blockSize.y;
+    GEMM_vector_kernel<Identity><<<gridSize, blockSize>>>(
+        W2, A1, A2, b2, L, N, M);
+    check_launch("GEMM_vector_kernel layer2");
+
+    // Step 2b: Now we want to apply the softmax kernel to Z2 (which is stored
+    // in A2) to get the correct A2 = yhat.
+    blockSize.x = 256;
+    blockSize.y = 1;
+    gridSize.x  = (N + blockSize.x - 1)/blockSize.x;
+    gridSize.y  = 1;
+    softmax_kernel<<<gridSize, blockSize>>>(A2, L, N);
+    check_launch("softmax_kernel");
+
+    return 0;
 }
 
+/******************************************************************************\
+ * Section 4: Back Propogation Special Functions                              *
+\******************************************************************************/
 
+/**
+ * \brief Computes the difference yhat - y in the back propogation and stores
+ * the result in yhat.
+ *  
+ * Use blocks of 1x256 for this kernel
+ */
+__global__
+void backPropDiff_kernel(double *yhat, double *y, int L, int N)
+{
+    int col = blockIdx.x*blockDim.x + threadIdx.x;
 
-void mySpecialHadamard_kernel(double *dA1, double *A1, double *dZ1, 
-                              int M, int N) {
-    // TODO
+    int c = y[col];
+
+    if (col < N)
+    {
+        for(int i = 0; i < L; i++)
+            yhat[col*L + i] -= (c == i ? 1 : 0); 
+    }
+}
+
+/**
+ * \brief Kernel for summing by row to get a column vector in the first column
+ * of the array A.
+ *
+ * This could be modified to be algorithmically faster, but there may be more
+ * associated memory traffic.
+ *
+ */
+__global__
+void myRowSum_kernel(double *A, int M, int N, int stride, int num_iter)
+{
+    int row = blockIdx.x*blockDim.x + threadIdx.x;
+
+    if (row < M)
+    {
+        int start_col = (blockIdx.y*blockDim.y + threadIdx.y)*stride*num_iter;
+        int end_col   = (blockIdx.y*blockDim.y + threadIdx.y+1)*stride*num_iter;
+
+        double sum = 0; 
+        for(int col = end_col-stride; col >= start_col; col -= stride)
+        {
+            if(col < N)
+                sum += A[col*M + row];
+        }
+        if(start_col < N)
+            A[start_col*M + row] = sum;
+    }
+}
+
+void myRowSum(double *A, int M, int N)
+{
+    dim3 blockSize (BLOCK_SIZE, BLOCK_SIZE);
+
+    int num_iters = 4;
+    int stride = 1;
+
+    dim3 gridSize ((M + blockSize.x - 1)/blockSize.x,
+                   (N + (blockSize.y*stride*num_iters) - 1) /
+                        (blockSize.y*stride*num_iters));
+
+    myRowSum_kernel<<<gridSize, blockSize>>>(A, M, N, stride, num_iters);
+    check_launch("myRowSum_kernel");
+
+    while (stride*num_iters < N)
+    {
+      stride *= num_iters;
+      gridSize.y = (N + (blockSize.y*stride*num_iters) - 1) /
+                        (blockSize.y*stride*num_iters);
+      
+      myRowSum_kernel<<<gridSize, blockSize>>>(A, M, N, stride, num_iters);
+      check_launch("myRowSum_kernel");
+    }
 }
 
 
 /**
- * \brief Function for carrying out the special Hadamard product present in our
- * back propogation process.
+ * \brief Kernel which performs the special Hadamard product present in the back
+ * propogation.
+ *
+ * Note that dZ1 is stored in the memory occupied initially by dA1.
+ */
+__global__
+void mySpecialHadamard_kernel(double *dA1, double *A1, 
+                              int M, int N) {
+    int row = blockIdx.x*blockDim.x + threadIdx.x;
+    int col = blockIdx.y*blockDim.y + threadIdx.y;
+
+    if ((row < M) && (col < N))
+    {
+        double A1_elem   =  A1[M*col + row];
+        dA1[M*col + row] = dA1[M*col + row] * A1_elem * (1 - A1_elem);
+    }
+}
+
+
+__global__
+void onDeviceCopy_kernel(double *A, double *B, int M, int N)
+{
+    int row = blockIdx.x*blockDim.x + threadIdx.x;
+    int col = blockIdx.y*blockDim.y + threadIdx.y;
+
+    if ((row < M) && (col < N))
+    {
+        A[col*M + row] = B[col*M + row];
+    }
+}
+
+void onDeviceCopy(double *A, double *B, int M, int N)
+{
+    dim3 blockSize (BLOCK_SIZE, BLOCK_SIZE);
+    dim3 gridSize ((M + blockSize.x - 1)/blockSize.x,
+                   (N + blockSize.y - 1)/blockSize.y);
+
+    onDeviceCopy_kernel<<<gridSize,blockSize>>>(A, B, M, N);
+    check_launch("onDeviceCopy kernel");
+}
+
+
+
+/**
+ * \brief Function for carrying out the back propogation
  *
  * Arguments are as follows:
  * dA1: The Jacobian of the objective function with respect to A1.
@@ -160,9 +380,70 @@ void mySpecialHadamard_kernel(double *dA1, double *A1, double *dZ1,
  * M:   The number of rows in all of these matrices.
  * N:   The number of columns in all of these matrices.
  */
-int mySpecialHadamard(double *dA1, double *A1, double *dZ1, int M, int N)
-{
-    // TODO
+int myBackPropogation(double* X, double *y,
+                      double* A1,  double* W1,
+                      double* A2,  double* W2,
+                      double* dA1, double* dW1, double* &db1,
+                                   double* dW2, double* &db2,
+                      int K, int M, int N, int L,
+                      double reg)
+{   
+    // Set up aliases
+    double *diff = A2;
+    double *dZ1 = dA1;
+
+
+    // Step 1: Find the difference yhat - y
+    dim3 blockSize (256, 1); 
+    dim3 gridSize ((N + blockSize.x - 1)/blockSize.x, 1);
+
+    backPropDiff_kernel<<<gridSize,blockSize>>>(diff, y, L, N);           ////// 
+    check_launch("backPropDiff kernel");
+
+    // Step 2: Compute dW2
+    onDeviceCopy(dW2, W2, L, M);
+    blockSize.x = BLOCK_SIZE;
+    blockSize.y = BLOCK_SIZE;
+    gridSize.x  = (L + blockSize.x - 1)/blockSize.x;
+    gridSize.y  = (M + blockSize.y - 1)/blockSize.y;
+
+    // Include offset, transpose A1
+    myGEMM_kernel<Identity, true, false, true><<<gridSize, blockSize>>>(
+        diff, A1, dW2, 1, reg, L, M, N);                                  ////// 
+    check_launch("myGEMM_kernel");
+
+    // Step 3: Compute dA1
+    gridSize.x  = (M + blockSize.x - 1)/blockSize.x;
+    gridSize.y  = (N + blockSize.y - 1)/blockSize.y;
+    // Do not include offset, transpose W2
+    myGEMM_kernel<Identity, false, true, false><<<gridSize, blockSize>>>(
+        W2, diff, dA1, 1, 1, M, N, L);                                    ////// 
+    check_launch("myGEMM_kernel");
+
+    // Step 4: Compute db2
+    myRowSum(diff, L, N);
+    db2 = diff; // Since everything is summed into the first row of diff, we can
+                // We can just do this.                                   ////// 
+
+    // Step 5: Compute dZ1
+    // Gridsize is still fine
+    mySpecialHadamard_kernel<<<gridSize, blockSize>>>(dZ1, A1, M, N);     ////// 
+    check_launch("mySpecialHadamard_kernel");
+
+    // Step 6: Compute dW1
+    onDeviceCopy(dW1, W1, M, K);
+    gridSize.x  = (M + blockSize.x - 1)/blockSize.x;
+    gridSize.y  = (K + blockSize.y - 1)/blockSize.y;
+    // Include offset, transpose X
+    myGEMM_kernel<Identity, true, false, true><<<gridSize, blockSize>>>(
+        dZ1, X, dW1, 1, reg, M, K, N);                                    //////
+    check_launch("myGEMM_kernel");
+
+    // Step 7: Compute db1
+    myRowSum(dZ1, M, N);
+    db1 = dZ1;                                                            //////
+    
+    return 0;
 }
 
 
