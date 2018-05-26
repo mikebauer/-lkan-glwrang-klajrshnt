@@ -37,4 +37,4 @@ echo ----------------
 
 # mpirun -np 4 ./main -s -n 1000 -b 800 -l 0.01 -e 20
 mpirun -np 1 ./main -n 20 -e 3 -sd
-# mpirun -np 1 ./main -g 1
+# mpirun -np 1 ./main -g 4

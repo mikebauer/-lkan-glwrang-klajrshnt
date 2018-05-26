@@ -380,18 +380,6 @@ void onDeviceCopy(double *A, double *B, int M, int N)
  */
 int myBackPropogation(deviceCache &d, double *X, double *y, int N, double reg)
 {
-/*
-double* X, double *y,
-double* A1,  double* W1,
-double* A2,  double* W2,
-double* dA1, double* dW1, double* &db1,
-             double* dW2, double* &db2,
-int K, int M, int N, int L,
-double reg)
-*/
-
-
-
     // Set up aliases
     double *A1 = d.A1;
     double *W1 = d.W1;
@@ -463,6 +451,67 @@ double reg)
     d.db1 = db1;
     
     return 0;
+}
+
+
+/******************************************************************************\
+ * Section 5: Gradient Descent Special Functions                              *
+\******************************************************************************/
+
+
+/**
+ * \brief GPU kernel for performing the gradient descent update.
+ */
+__global__
+void grad_descent_kernel(double *W_or_b, double *grad, double learning_rate,
+                         int M, int N)
+{
+    int row = blockIdx.x*blockDim.x + threadIdx.x;
+    int col = blockIdx.y*blockDim.y + threadIdx.y;
+
+    if ((row < M) && (col < N))
+    {
+        W_or_b[col*M + row] -= learning_rate * grad[col*M + row];
+    }
+}
+
+
+/**
+ * \brief Performs the gradient descent update accelrated by the gpu
+ */
+void myGradientDescent(deviceCache &d, double learning_rate)
+{
+    // Step 1: Update W1
+    dim3 blockSize (BLOCK_SIZE, BLOCK_SIZE);
+    dim3 gridSize  ((d.M + blockSize.x - 1)/blockSize.x,
+                    (d.K + blockSize.y - 1)/blockSize.y); 
+    grad_descent_kernel<<<gridSize, blockSize>>>(d.W1, d.dW1, learning_rate,
+                                                 d.M, d.K);
+    check_launch("grad_descent_kernel");
+
+    // Step 2: Update W2
+    gridSize.x = (d.L + blockSize.x - 1)/blockSize.x;
+    gridSize.y = (d.M + blockSize.y - 1)/blockSize.y;
+    grad_descent_kernel<<<gridSize, blockSize>>>(d.W2, d.dW2, learning_rate,
+                                                 d.L, d.M);
+    check_launch("grad_descent_kernel");
+
+    // Step 3: Update b1
+    blockSize.x = 256;
+    blockSize.y = 1;
+    gridSize.x = (d.M + blockSize.x - 1)/blockSize.x;
+    gridSize.y = 1;
+    grad_descent_kernel<<<gridSize, blockSize>>>(d.b1, d.db1, learning_rate,
+                                                 d.M, 1);
+    check_launch("grad_descent_kernel");
+
+
+    // Step 4: Update b2
+    gridSize.x = (d.L + blockSize.x - 1)/blockSize.x;
+    grad_descent_kernel<<<gridSize, blockSize>>>(d.b2, d.db2, learning_rate,
+                                                 d.L, 1);
+
+    check_launch("grad_descent_kernel");
 }
 
 

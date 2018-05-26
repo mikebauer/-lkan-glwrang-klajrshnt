@@ -108,6 +108,7 @@ class deviceCache {
 
 int myFeedForward(deviceCache &d, double* X, int N);
 int myBackPropogation(deviceCache &d, double *X, double *y, int N, double reg);
+void myGradientDescent(deviceCache &d, double learning_rate);
 void myRowSum(double *A, int M, int N);
 
 

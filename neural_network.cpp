@@ -280,6 +280,45 @@ void train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
 }
 
 
+void update_nn_from_deviceCache(NeuralNetwork& nn, deviceCache& dCache)
+{
+    checkCudaErrors(
+        cudaMemcpy(nn.W[0].memptr(),
+                   dCache.W1, sizeof(double)*dCache.M*dCache.K,
+                   cudaMemcpyDeviceToHost));
+
+    checkCudaErrors(
+        cudaMemcpy(nn.b[0].memptr(),
+                   dCache.b1, sizeof(double)*dCache.M,
+                   cudaMemcpyDeviceToHost));
+
+    checkCudaErrors(
+        cudaMemcpy(nn.W[1].memptr(),
+                   dCache.W2, sizeof(double)*dCache.L*dCache.M,
+                   cudaMemcpyDeviceToHost));
+
+    checkCudaErrors(
+        cudaMemcpy(nn.b[1].memptr(),
+                   dCache.b2, sizeof(double)*dCache.L,
+                   cudaMemcpyDeviceToHost));
+}
+
+
+void update_deviceCache_from_nn(NeuralNetwork& nn, deviceCache& dCache)
+{
+    checkCudaErrors(
+        cudaMemcpy(dCache.W1, nn.W[0].memptr(), sizeof(double) * dCache.M * 
+        dCache.K, cudaMemcpyHostToDevice)); 
+    checkCudaErrors(
+        cudaMemcpy(dCache.b1, nn.b[0].memptr(), sizeof(double) * dCache.M,
+        cudaMemcpyHostToDevice)); 
+    checkCudaErrors(
+        cudaMemcpy(dCache.W2, nn.W[1].memptr(), sizeof(double) * dCache.L * 
+        dCache.M, cudaMemcpyHostToDevice)); 
+    checkCudaErrors(
+        cudaMemcpy(dCache.b2, nn.b[1].memptr(), sizeof(double) * dCache.L,
+        cudaMemcpyHostToDevice)); 
+}
 
 /*
  * TODO
@@ -311,6 +350,8 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
     int L = nn.H[2];
 
     deviceCache dCache (X.memptr(), y.memptr(), K, L, M, N, batch_size);
+    update_deviceCache_from_nn(nn, dCache);
+
 
 /******************************************************************************/
 
@@ -339,81 +380,16 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
 /******************************************************************************/
 // Single Proc Implementation
 
-
-             
-
             int last_col = std::min((batch + 1)*batch_size-1, N-1);
-            arma::mat X_batch = X.cols(batch * batch_size, last_col);
-            arma::mat y_batch = y.cols(batch * batch_size, last_col);
-
             int N_local = last_col - batch*batch_size + 1;
 
             double *dX_batch = dCache.X + batch*batch_size*K;
             double *dy_batch = dCache.y + batch*batch_size*L;
 
-            if (y.n_rows != L)
-            {
-                std::cout << "No!!!" << std::endl;
-                exit(1);
-            }
-
-            checkCudaErrors(
-                cudaMemcpy(dCache.W1, nn.W[0].memptr(), sizeof(double) * M * K,
-                cudaMemcpyHostToDevice)); 
-            checkCudaErrors(
-                cudaMemcpy(dCache.b1, nn.b[0].memptr(), sizeof(double) * M,
-                cudaMemcpyHostToDevice)); 
-            checkCudaErrors(
-                cudaMemcpy(dCache.W2, nn.W[1].memptr(), sizeof(double) * L * M,
-                cudaMemcpyHostToDevice)); 
-            checkCudaErrors(
-                cudaMemcpy(dCache.b2, nn.b[1].memptr(), sizeof(double) * L,
-                cudaMemcpyHostToDevice)); 
-
-            struct cache bpcache;
-
-
             myFeedForward(dCache, dX_batch, N_local); 
-
-
             myBackPropogation(dCache, dX_batch, dy_batch, N_local, reg);
-
-            struct grads bpgrads;
-            bpgrads.dW.resize(2);
-            bpgrads.db.resize(2);
-            bpgrads.dW[0] = arma::mat(M, K, arma::fill::none);
-            bpgrads.dW[1] = arma::mat(L, M, arma::fill::none);
-            bpgrads.db[0] = arma::colvec(M, arma::fill::none);
-            bpgrads.db[1] = arma::colvec(L, arma::fill::none);
-
-            checkCudaErrors(
-                cudaMemcpy(bpgrads.dW[0].memptr(),
-                           dCache.dW1, sizeof(double)*M*K,
-                           cudaMemcpyDeviceToHost));
-            checkCudaErrors(
-                cudaMemcpy(bpgrads.dW[1].memptr(),
-                           dCache.dW2, sizeof(double)*L*M,
-                           cudaMemcpyDeviceToHost));
-
-            checkCudaErrors(
-                cudaMemcpy(bpgrads.db[0].memptr(),
-                           dCache.db1, sizeof(double)*M,
-                           cudaMemcpyDeviceToHost));
-
-            checkCudaErrors(
-                cudaMemcpy(bpgrads.db[1].memptr(),
-                           dCache.db2, sizeof(double)*L,
-                           cudaMemcpyDeviceToHost));
-
-
-            // Gradient descent step
-            for(int i = 0; i < nn.W.size(); ++i) {
-                nn.W[i] -= learning_rate * bpgrads.dW[i];
-            }
-
-            for(int i = 0; i < nn.b.size(); ++i) {
-                nn.b[i] -= learning_rate * bpgrads.db[i];
-            }
+            myGradientDescent(dCache, learning_rate);
+            update_nn_from_deviceCache(nn, dCache);
 
 /******************************************************************************/
 
