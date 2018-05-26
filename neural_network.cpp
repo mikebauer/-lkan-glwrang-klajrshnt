@@ -349,6 +349,13 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
             int N_local = last_col - batch*batch_size + 1;
 
             double *dX_batch = dCache.X + batch*batch_size*K;
+            double *dy_batch = dCache.y + batch*batch_size*L;
+
+            if (y.n_rows != L)
+            {
+                std::cout << "No!!!" << std::endl;
+                exit(1);
+            }
 
             checkCudaErrors(
                 cudaMemcpy(dCache.W1, nn.W[0].memptr(), sizeof(double) * M * K,
@@ -368,46 +375,36 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
 
             myFeedForward(dCache, dX_batch, N_local); 
 
-            // Get A1 and A2 back into host memory
-            bpcache.a.resize(2);
-            arma::mat a1 (M, N_local, arma::fill::zeros);
-            checkCudaErrors(
-                cudaMemcpy(a1.memptr(), dCache.A1, sizeof(double)*M*N_local,
-                cudaMemcpyDeviceToHost));
-            bpcache.a[0] = a1;
 
-            arma::mat a2 (L, N_local, arma::fill::zeros);
-            checkCudaErrors(
-                cudaMemcpy(a2.memptr(), dCache.A2, sizeof(double)*L*N_local,
-                cudaMemcpyDeviceToHost));
-            bpcache.a[1] = a2;
-            bpcache.yc   = a2;
-            bpcache.X = X_batch;
-
-            //if(M != 20)
-            //{
-            //    std::cout << "Ur Wrong" << std ::endl;
-            //    exit(1);
-            //}
-
-            //if((batch == 0) && (epoch == 0))
-            //{
-            //    std::cout << std::endl;
-            //    for(int i = 0; i < M; i++)
-            //        std::cout << a1(i, 0) << std::endl;
-            //}
-
-            //feedforward(nn, X_batch, bpcache);
-
-            //if((batch == 0) && (epoch == 0))
-            //{
-            //    std::cout << std::endl;
-            //    for(int i = 0; i < M; i++)
-            //        std::cout << bpcache.a[0](i, 0) << std::endl;
-            //}
+            myBackPropogation(dCache, dX_batch, dy_batch, N_local, reg);
 
             struct grads bpgrads;
-            backprop(nn, y_batch, reg, bpcache, bpgrads);
+            bpgrads.dW.resize(2);
+            bpgrads.db.resize(2);
+            bpgrads.dW[0] = arma::mat(M, K, arma::fill::none);
+            bpgrads.dW[1] = arma::mat(L, M, arma::fill::none);
+            bpgrads.db[0] = arma::colvec(M, arma::fill::none);
+            bpgrads.db[1] = arma::colvec(L, arma::fill::none);
+
+            checkCudaErrors(
+                cudaMemcpy(bpgrads.dW[0].memptr(),
+                           dCache.dW1, sizeof(double)*M*K,
+                           cudaMemcpyDeviceToHost));
+            checkCudaErrors(
+                cudaMemcpy(bpgrads.dW[1].memptr(),
+                           dCache.dW2, sizeof(double)*L*M,
+                           cudaMemcpyDeviceToHost));
+
+            checkCudaErrors(
+                cudaMemcpy(bpgrads.db[0].memptr(),
+                           dCache.db1, sizeof(double)*M,
+                           cudaMemcpyDeviceToHost));
+
+            checkCudaErrors(
+                cudaMemcpy(bpgrads.db[1].memptr(),
+                           dCache.db2, sizeof(double)*L,
+                           cudaMemcpyDeviceToHost));
+
 
             // Gradient descent step
             for(int i = 0; i < nn.W.size(); ++i) {

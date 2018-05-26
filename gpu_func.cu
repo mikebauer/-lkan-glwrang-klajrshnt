@@ -261,12 +261,10 @@ void backPropDiff_kernel(double *yhat, double *y, int L, int N)
 {
     int col = blockIdx.x*blockDim.x + threadIdx.x;
 
-    int c = y[col];
-
     if (col < N)
     {
         for(int i = 0; i < L; i++)
-            yhat[col*L + i] -= (c == i ? 1 : 0); 
+            yhat[col*L + i] = (yhat[col*L + i] -  y[col*L + i])/N;
     }
 }
 
@@ -380,17 +378,36 @@ void onDeviceCopy(double *A, double *B, int M, int N)
  * M:   The number of rows in all of these matrices.
  * N:   The number of columns in all of these matrices.
  */
-int myBackPropogation(double* X, double *y,
-                      double* A1,  double* W1,
-                      double* A2,  double* W2,
-                      double* dA1, double* dW1, double* &db1,
-                                   double* dW2, double* &db2,
-                      int K, int M, int N, int L,
-                      double reg)
-{   
+int myBackPropogation(deviceCache &d, double *X, double *y, int N, double reg)
+{
+/*
+double* X, double *y,
+double* A1,  double* W1,
+double* A2,  double* W2,
+double* dA1, double* dW1, double* &db1,
+             double* dW2, double* &db2,
+int K, int M, int N, int L,
+double reg)
+*/
+
+
+
     // Set up aliases
-    double *diff = A2;
-    double *dZ1 = dA1;
+    double *A1 = d.A1;
+    double *W1 = d.W1;
+    double *W2 = d.W2;
+    double *dA1 = d.dA1;
+    double *dW1 = d.dW1;
+    double *dW2 = d.dW2;
+    int L = d.L;
+    int M = d.M;
+    int K = d.K;
+
+    double *db1, *db2;
+
+
+    double *diff = d.A2;
+    double *dZ1 = d.dA1;
 
 
     // Step 1: Find the difference yhat - y
@@ -424,6 +441,7 @@ int myBackPropogation(double* X, double *y,
     myRowSum(diff, L, N);
     db2 = diff; // Since everything is summed into the first row of diff, we can
                 // We can just do this.                                   ////// 
+    d.db2 = db2;
 
     // Step 5: Compute dZ1
     // Gridsize is still fine
@@ -442,12 +460,9 @@ int myBackPropogation(double* X, double *y,
     // Step 7: Compute db1
     myRowSum(dZ1, M, N);
     db1 = dZ1;                                                            //////
+    d.db1 = db1;
     
     return 0;
 }
-
-
-
-
 
 

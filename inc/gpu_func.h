@@ -52,6 +52,8 @@ class deviceCache {
     double *A2, *W2, *b2;
     double *dA1, *dW1, *dW2;
 
+    double *db1, *db2; // Aren't actually alloced memory, but hold pointers
+
     int K, L, M, N;
 
     deviceCache(const double *host_X, const double *host_y, 
@@ -105,7 +107,7 @@ class deviceCache {
 };
 
 int myFeedForward(deviceCache &d, double* X, int N);
-
+int myBackPropogation(deviceCache &d, double *X, double *y, int N, double reg);
 void myRowSum(double *A, int M, int N);
 
 
