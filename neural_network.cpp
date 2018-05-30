@@ -320,6 +320,7 @@ void update_deviceCache_from_nn(NeuralNetwork& nn, deviceCache& dCache)
         cudaMemcpyHostToDevice)); 
 }
 
+
 /*
  * TODO
  * Train the neural network &nn of rank 0 in parallel. Your MPI implementation
@@ -341,20 +342,13 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
     error_file.open("Outputs/CpuGpuDiff.txt");
     int print_flag = 0;
 
-/******************************************************************************/
-// Single Proc Implementation
-
     int K = nn.H[0];
     int M = nn.H[1];
     // N already defined
     int L = nn.H[2];
 
-    deviceCache dCache (X.memptr(), y.memptr(), K, L, M, N, batch_size);
+    deviceCache dCache (K, L, M, N, batch_size);
     update_deviceCache_from_nn(nn, dCache);
-
-
-/******************************************************************************/
-
 
     /* HINT: You can obtain a raw pointer to the memory used by Armadillo Matrices
        for storing elements in a column major way. Or you can allocate your own array
@@ -364,6 +358,34 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
     /* iter is a variable used to manage debugging. It increments in the inner loop
        and therefore goes from 0 to epochs*num_batches */
     int iter = 0;
+
+    // TODO Check mallocs
+    double *dW1 = (double *)malloc(M*K*sizeof(double));
+    double *db1 = (double *)malloc(M*sizeof(double));
+    double *dW2 = (double *)malloc(L*M*sizeof(double));
+    double *db2 = (double *)malloc(L*sizeof(double));
+
+    double *dW1_g = (double *)malloc(M*K*sizeof(double));
+    double *db1_g = (double *)malloc(M*sizeof(double));
+    double *dW2_g = (double *)malloc(L*M*sizeof(double));
+    double *db2_g = (double *)malloc(L*sizeof(double));
+
+    // Find the maximum possible number of images per process per batch. 
+    int N_proc = (batch_size + (num_procs) - 1)/num_procs;
+
+    double *X_proc = (double *)malloc(K*N_proc*sizeof(double));
+    double *y_proc = (double *)malloc(L*N_proc*sizeof(double));
+
+    double *dX_proc;
+    double *dy_proc;
+
+    checkCudaErrors(cudaMalloc((void **)&dX_proc, K*N_proc*sizeof(double)));
+    checkCudaErrors(cudaMalloc((void **)&dy_proc, L*N_proc*sizeof(double)));
+
+    int X_sendcounts[num_procs];
+    int X_displs[num_procs];
+    int y_sendcounts[num_procs];
+    int y_displs[num_procs];
 
     for(int epoch = 0; epoch < epochs; ++epoch) {
         int num_batches = (N + batch_size - 1)/batch_size;
@@ -377,21 +399,72 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
              * 4. update local network coefficient at each node
              */
 
-/******************************************************************************/
-// Single Proc Implementation
 
             int last_col = std::min((batch + 1)*batch_size-1, N-1);
-            int N_local = last_col - batch*batch_size + 1;
+            int N_batch  = std::min((batch + 1)*batch_size, N) 
+                         - batch*batch_size;
 
-            double *dX_batch = dCache.X + batch*batch_size*K;
-            double *dy_batch = dCache.y + batch*batch_size*L;
+            double *X_batch = (double *)X.memptr() + batch*batch_size*K;
+            double *y_batch = (double *)y.memptr() + batch*batch_size*L;
 
-            myFeedForward(dCache, dX_batch, N_local); 
-            myBackPropogation(dCache, dX_batch, dy_batch, N_local, reg);
-            myGradientDescent(dCache, learning_rate);
+            N_proc = (N_batch + (num_procs - 1)) / 
+                      num_procs;
+
+            for(int i = 0; i < num_procs; i++)
+            {
+                X_sendcounts[i] = (std::min((i + 1) * N_proc, N_batch) 
+                                - i*N_proc)*K;
+                y_sendcounts[i] = (std::min((i + 1) * N_proc, N_batch) 
+                                - i*N_proc)*L;
+                X_displs[i] = i*N_proc*K;
+                y_displs[i] = i*N_proc*L;
+            }
+            N_proc = std::min((rank + 1) * N_proc, N_batch) - rank*N_proc;
+
+            MPI_Scatterv(X_batch, X_sendcounts, X_displs, MPI_DOUBLE, X_proc, 
+                         X_sendcounts[rank], MPI_DOUBLE, 0, MPI_COMM_WORLD);
+
+            MPI_Scatterv(y_batch, y_sendcounts, y_displs, MPI_DOUBLE, y_proc, 
+                         y_sendcounts[rank], MPI_DOUBLE, 0, MPI_COMM_WORLD);
+
+            checkCudaErrors(cudaMemcpy(dX_proc, X_proc, K*N_proc*sizeof(double),
+                                       cudaMemcpyHostToDevice));
+
+            checkCudaErrors(cudaMemcpy(dy_proc, y_proc, L*N_proc*sizeof(double),
+                                       cudaMemcpyHostToDevice));
+
+            myFeedForward(dCache, dX_proc, N_proc); 
+            myBackPropogation(dCache, dX_proc, dy_proc, N_proc, reg);
+
+            checkCudaErrors(cudaMemcpy(dW1, dCache.dW1, M*K*sizeof(double), 
+                            cudaMemcpyDeviceToHost));
+            checkCudaErrors(cudaMemcpy(db1, dCache.db1, M*sizeof(double),   
+                            cudaMemcpyDeviceToHost));
+            checkCudaErrors(cudaMemcpy(dW2, dCache.dW2, L*M*sizeof(double), 
+                            cudaMemcpyDeviceToHost));
+            checkCudaErrors(cudaMemcpy(db2, dCache.db2, L*sizeof(double),   
+                            cudaMemcpyDeviceToHost));
+
+            MPI_SAFE_CALL(MPI_Allreduce(dW1, dW1_g, M*K, MPI_DOUBLE, MPI_SUM, 
+                                        MPI_COMM_WORLD));
+            MPI_SAFE_CALL(MPI_Allreduce(db1, db1_g, M,   MPI_DOUBLE, MPI_SUM, 
+                                        MPI_COMM_WORLD));
+            MPI_SAFE_CALL(MPI_Allreduce(dW2, dW2_g, L*M, MPI_DOUBLE, MPI_SUM, 
+                                        MPI_COMM_WORLD));
+            MPI_SAFE_CALL(MPI_Allreduce(db2, db2_g, L,   MPI_DOUBLE, MPI_SUM, 
+                                        MPI_COMM_WORLD));
+
+            checkCudaErrors(cudaMemcpy(dCache.dW1, dW1_g, M*K*sizeof(double), 
+                                       cudaMemcpyHostToDevice));
+            checkCudaErrors(cudaMemcpy(dCache.db1, db1_g, M*sizeof(double),   
+                                       cudaMemcpyHostToDevice));
+            checkCudaErrors(cudaMemcpy(dCache.dW2, dW2_g, L*M*sizeof(double), 
+                                       cudaMemcpyHostToDevice));
+            checkCudaErrors(cudaMemcpy(dCache.db2, db2_g, L*sizeof(double),   
+                                       cudaMemcpyHostToDevice));
+
+            myGradientDescent(dCache, learning_rate, N_batch);
             update_nn_from_deviceCache(nn, dCache);
-
-/******************************************************************************/
 
             if(print_every <= 0) {
                 print_flag = batch == 0;
@@ -408,6 +481,18 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
             iter++;
         }
     }
+
+    free(X_proc);
+    free(y_proc);
+    free(dW1);
+    free(db1);
+    free(dW2);
+    free(db2);
+    free(dW1_g);
+    free(db1_g);
+    free(dW2_g);
+    free(db2_g);
+
 
     error_file.close();
 }

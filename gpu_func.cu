@@ -24,7 +24,6 @@ struct Sigmoid
     static double func(double x){return 1 / (1 + exp(-x));}
 };
 
-
 /******************************************************************************\
  * Section 2: General Functions                                               *
 \******************************************************************************/
@@ -268,6 +267,26 @@ void backPropDiff_kernel(double *yhat, double *y, int L, int N)
     }
 }
 
+
+__global__
+void vector_scale_kernel(double *v, int M, int scale)
+{
+    int row = blockIdx.x*blockDim.x + threadIdx.x;
+
+    if(row < M)
+        v[row] *= scale;
+}
+
+__global__
+void matrix_scale_kernel(double *A, int M, int N, int scale)
+{
+    int row = blockIdx.x*blockDim.x + threadIdx.x;
+    int col = blockIdx.y*blockDim.y + threadIdx.y;
+
+    if((row < M) && (col < N))
+        A[row + M*col] *= scale;
+}
+
 /**
  * \brief Kernel for summing by row to get a column vector in the first column
  * of the array A.
@@ -320,6 +339,14 @@ void myRowSum(double *A, int M, int N)
       myRowSum_kernel<<<gridSize, blockSize>>>(A, M, N, stride, num_iters);
       check_launch("myRowSum_kernel");
     }
+
+    blockSize.x = 256;
+    blockSize.y = 1;
+    gridSize.x = (M + blockSize.x - 1)/blockSize.x;
+    gridSize.y = 1;
+
+    vector_scale_kernel<<<gridSize, blockSize>>>(A, M, N);
+    check_launch("vector_scale_kernel");
 }
 
 
@@ -417,6 +444,9 @@ int myBackPropogation(deviceCache &d, double *X, double *y, int N, double reg)
         diff, A1, dW2, 1, reg, L, M, N);                                  ////// 
     check_launch("myGEMM_kernel");
 
+    matrix_scale_kernel<<<gridSize, blockSize>>>(dW2, L, M, N);
+    check_launch("matrix_scale_kernel");
+
     // Step 3: Compute dA1
     gridSize.x  = (M + blockSize.x - 1)/blockSize.x;
     gridSize.y  = (N + blockSize.y - 1)/blockSize.y;
@@ -431,6 +461,9 @@ int myBackPropogation(deviceCache &d, double *X, double *y, int N, double reg)
                 // We can just do this.                                   ////// 
     d.db2 = db2;
 
+    
+
+
     // Step 5: Compute dZ1
     // Gridsize is still fine
     mySpecialHadamard_kernel<<<gridSize, blockSize>>>(dZ1, A1, M, N);     ////// 
@@ -444,6 +477,9 @@ int myBackPropogation(deviceCache &d, double *X, double *y, int N, double reg)
     myGEMM_kernel<Identity, true, false, true><<<gridSize, blockSize>>>(
         dZ1, X, dW1, 1, reg, M, K, N);                                    //////
     check_launch("myGEMM_kernel");
+
+    matrix_scale_kernel<<<gridSize, blockSize>>>(dW1, M, K, N);
+    check_launch("matrix_scale_kernel");
 
     // Step 7: Compute db1
     myRowSum(dZ1, M, N);
@@ -464,36 +500,36 @@ int myBackPropogation(deviceCache &d, double *X, double *y, int N, double reg)
  */
 __global__
 void grad_descent_kernel(double *W_or_b, double *grad, double learning_rate,
-                         int M, int N)
+                         int M, int N, int normalization)
 {
     int row = blockIdx.x*blockDim.x + threadIdx.x;
     int col = blockIdx.y*blockDim.y + threadIdx.y;
 
     if ((row < M) && (col < N))
     {
-        W_or_b[col*M + row] -= learning_rate * grad[col*M + row];
+        W_or_b[col*M + row] -= learning_rate 
+                             * (grad[col*M + row]/normalization);
     }
 }
-
 
 /**
  * \brief Performs the gradient descent update accelrated by the gpu
  */
-void myGradientDescent(deviceCache &d, double learning_rate)
+void myGradientDescent(deviceCache &d, double learning_rate, int N)
 {
     // Step 1: Update W1
     dim3 blockSize (BLOCK_SIZE, BLOCK_SIZE);
     dim3 gridSize  ((d.M + blockSize.x - 1)/blockSize.x,
                     (d.K + blockSize.y - 1)/blockSize.y); 
     grad_descent_kernel<<<gridSize, blockSize>>>(d.W1, d.dW1, learning_rate,
-                                                 d.M, d.K);
+                                                 d.M, d.K, N);
     check_launch("grad_descent_kernel");
 
     // Step 2: Update W2
     gridSize.x = (d.L + blockSize.x - 1)/blockSize.x;
     gridSize.y = (d.M + blockSize.y - 1)/blockSize.y;
     grad_descent_kernel<<<gridSize, blockSize>>>(d.W2, d.dW2, learning_rate,
-                                                 d.L, d.M);
+                                                 d.L, d.M, N);
     check_launch("grad_descent_kernel");
 
     // Step 3: Update b1
@@ -502,14 +538,14 @@ void myGradientDescent(deviceCache &d, double learning_rate)
     gridSize.x = (d.M + blockSize.x - 1)/blockSize.x;
     gridSize.y = 1;
     grad_descent_kernel<<<gridSize, blockSize>>>(d.b1, d.db1, learning_rate,
-                                                 d.M, 1);
+                                                 d.M, 1, N);
     check_launch("grad_descent_kernel");
 
 
     // Step 4: Update b2
     gridSize.x = (d.L + blockSize.x - 1)/blockSize.x;
     grad_descent_kernel<<<gridSize, blockSize>>>(d.b2, d.db2, learning_rate,
-                                                 d.L, 1);
+                                                 d.L, 1, N);
 
     check_launch("grad_descent_kernel");
 }

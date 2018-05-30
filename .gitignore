@@ -3,3 +3,7 @@ Outputs
 Outputs/*
 lib
 obj
+*.nvprof
+*.err
+*.out
+main

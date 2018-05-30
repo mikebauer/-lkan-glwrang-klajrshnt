@@ -47,7 +47,6 @@ int myGEMM(double* A, double* B, double* C, double* alpha, double* beta, int M,
 
 class deviceCache {
   public:
-    double *X, *y;
     double *A1, *W1, *b1;
     double *A2, *W2, *b2;
     double *dA1, *dW1, *dW2;
@@ -56,16 +55,10 @@ class deviceCache {
 
     int K, L, M, N;
 
-    deviceCache(const double *host_X, const double *host_y, 
-                int _K, int _L, int _M, int _N, int batch_size)
+    deviceCache(int _K, int _L, int _M, int _N, int batch_size)
         : K(_K), L(_L), M(_M), N(_N)
     {
         // Allocate all of the cache space
-        checkCudaErrors(
-            cudaMalloc((void **)&X, K * N * sizeof(double)));
-        checkCudaErrors(
-            cudaMalloc((void **)&y, L * N * sizeof(double)));
-
         checkCudaErrors(
             cudaMalloc((void **)&A1, M * batch_size * sizeof(double)));
         checkCudaErrors(
@@ -80,20 +73,10 @@ class deviceCache {
         checkCudaErrors(cudaMalloc((void **)&dW2, L * M * sizeof(double)));
         checkCudaErrors(cudaMalloc((void **)&b2, L * sizeof(double)));
 
-        // Load the host X and y data
-        checkCudaErrors(
-            cudaMemcpy(X, host_X, sizeof(double) * K * N,
-                    cudaMemcpyHostToDevice));
-
-        checkCudaErrors(
-            cudaMemcpy(y, host_y, sizeof(double) * L * N,
-                    cudaMemcpyHostToDevice));
     }
 
     ~deviceCache()
     {
-        cudaFree(X);
-        cudaFree(y); 
         cudaFree(A1); 
         cudaFree(W1); 
         cudaFree(b1); 
@@ -108,7 +91,7 @@ class deviceCache {
 
 int myFeedForward(deviceCache &d, double* X, int N);
 int myBackPropogation(deviceCache &d, double *X, double *y, int N, double reg);
-void myGradientDescent(deviceCache &d, double learning_rate);
+void myGradientDescent(deviceCache &d, double learning_rate, int N);
 void myRowSum(double *A, int M, int N);
 
 
