@@ -464,7 +464,9 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
                                        cudaMemcpyHostToDevice));
 
             myGradientDescent(dCache, learning_rate, N_batch);
-            update_nn_from_deviceCache(nn, dCache);
+
+            if(rank == 0)
+                update_nn_from_deviceCache(nn, dCache);
 
             if(print_every <= 0) {
                 print_flag = batch == 0;

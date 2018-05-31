@@ -6,8 +6,7 @@
 #include "cublas_v2.h"
 
 #define BLOCK_SIZE (16)
-
-
+#define MAX_GRID_SIZE (65535) 
 /******************************************************************************\
  * Section 1: Helper Structs                                                  *
 \******************************************************************************/
@@ -27,7 +26,6 @@ struct Sigmoid
 /******************************************************************************\
  * Section 2: General Functions                                               *
 \******************************************************************************/
-
 
 __global__
 void device_add_one(int* d_result, int t) {
@@ -73,21 +71,35 @@ __global__ void myGEMM_kernel(double *A, double *B, double *C,
     int row = blockIdx.x*blockDim.x + threadIdx.x;
     int col = blockIdx.y*blockDim.y + threadIdx.y;
 
+    int num_rows = (M - row + (blockDim.x * gridDim.x - 1)) /
+                   (blockDim.x * gridDim.x);
 
-    if ((row < M) && (col < N))
+    int num_cols = (N - col + (blockDim.y * gridDim.y - 1)) /
+                   (blockDim.y * gridDim.y);
+
+    int curr_row, curr_col;
+
+    for(int i = 0; i < num_rows; i++)
     {
-        double product = 0;
-        double old_val = IncludeOffset ? C[M*col + row] : 0;
-        double Apart, Bpart;
-
-        for(int k = 0; k < K; k++)
+        curr_row = row + i*blockDim.x*gridDim.x;
+        for(int j = 0; j < num_cols; j++)
         {
-           Apart = (TransposeA ? A[row*K + k] : A[k*M + row]);
-           Bpart = (TransposeB ? B[k*N + col] : B[col*K + k]);
-           product += Apart * Bpart;
-        }
+            curr_col = col + j*blockDim.y*gridDim.y;
 
-        C[M*col + row] = PostOp::func(alpha*product + beta*old_val);
+            double product = 0;
+            double old_val = IncludeOffset ? C[M*curr_col + curr_row] : 0;
+            double Apart, Bpart;
+
+            for(int k = 0; k < K; k++)
+            {
+               Apart = (TransposeA ? A[curr_row*K + k] : A[k*M + curr_row]);
+               Bpart = (TransposeB ? B[k*N + curr_col] : B[curr_col*K + k]);
+               product += Apart * Bpart;
+            }
+
+            C[M*curr_col + curr_row] = PostOp::func(
+                                           alpha*product + beta*old_val);
+        }
     }
 }
 
@@ -113,8 +125,8 @@ int myGEMM(double* A, double* B, double* C, double* alpha, double* beta, int M,
            int N, int K) {
 
     dim3 blockSize (BLOCK_SIZE, BLOCK_SIZE);
-    dim3 gridSize ((M + blockSize.x - 1)/blockSize.x,
-                   (N + blockSize.y - 1)/blockSize.y);
+    dim3 gridSize (std::min((int)((M + blockSize.x - 1)/blockSize.x), MAX_GRID_SIZE),
+                   std::min((int)((N + blockSize.y - 1)/blockSize.y), MAX_GRID_SIZE));
 
     myGEMM_kernel<Identity, true, false, false><<<gridSize, blockSize>>>(
         A, B, C, *alpha, *beta, M, N, K);
@@ -124,11 +136,9 @@ int myGEMM(double* A, double* B, double* C, double* alpha, double* beta, int M,
     return 0;
 }
 
-
 /******************************************************************************\
  * Section 3: Feed Forward Special Functions                                  *
 \******************************************************************************/
-
 
 /**
  * \brief Kernel for Matrix multiplication with vector accumulator.
@@ -146,21 +156,34 @@ __global__ void GEMM_vector_kernel(double *A, double *B, double *C, double *v,
     int row = blockIdx.x*blockDim.x + threadIdx.x;
     int col = blockIdx.y*blockDim.y + threadIdx.y;
 
+    int num_rows = (M - row + (blockDim.x * gridDim.x - 1)) /
+                   (blockDim.x * gridDim.x);
 
-    if ((row < M) && (col < N))
+    int num_cols = (N - col + (blockDim.y * gridDim.y - 1)) /
+                   (blockDim.y * gridDim.y);
+
+    int curr_row, curr_col;
+
+    for(int i = 0; i < num_rows; i++)
     {
-        double product = 0;
-        double old_val = v[row];
-
-        for(int k = 0; k < K; k++)
+        curr_row = row + i*blockDim.x*gridDim.x;
+        for(int j = 0; j < num_cols; j++)
         {
-           product += A[k*M + row] * B[col*K + k];
-        }
+            curr_col = col + j*blockDim.y*gridDim.y;
 
-        C[M*col + row] = PostOp::func(product + old_val);
+            double product = 0;
+            double old_val = v[curr_row];
+
+            for(int k = 0; k < K; k++)
+            {
+               product += A[k*M + curr_row] * B[curr_col*K + k];
+            }
+
+            C[M*curr_col + curr_row] = 
+                PostOp::func(product + old_val);
+        }
     }
 }
-
 
 /**
  * \brief Kernel for finding the softmax
@@ -179,18 +202,23 @@ __global__ void softmax_kernel(double *Z2, int L, int N)
 {
     int col = blockIdx.x*blockDim.x + threadIdx.x;
 
-    if (col < N)
+    int num_cols = (N - col + (blockDim.x * gridDim.x - 1)) /
+                   (blockDim.x * gridDim.x);
+    int curr_col;
+
+    for(int c = 0; c < num_cols; c++)
     {
+        curr_col = col + c*blockDim.x*gridDim.x;
+
         double sum = 0;
         for(int i = 0; i < L; i++)
-            sum += exp(Z2[col*L + i]);
+            sum += exp(Z2[curr_col*L + i]);
 
         for(int i = 0; i < L; i++)
-            Z2[col*L + i] = exp(Z2[col*L + i]) / sum;
+            Z2[curr_col*L + i] = exp(Z2[curr_col*L + i]) / sum;
     }
+
 }
-
-
 
 /*
  * \brief Routine to perform Matrix multiplication with a vector-valued
@@ -216,8 +244,9 @@ int myFeedForward(deviceCache &d, double* X, int N)
 
     // Step 1: First layer. We want to compute A1 which is M by N
     dim3 blockSize (BLOCK_SIZE, BLOCK_SIZE);
-    dim3 gridSize ((M + blockSize.x - 1)/blockSize.x,
-                   (N + blockSize.y - 1)/blockSize.y);
+    dim3 gridSize (std::min((int)((M + blockSize.x - 1)/blockSize.x), MAX_GRID_SIZE),
+                   std::min((int)((N + blockSize.y - 1)/blockSize.y), MAX_GRID_SIZE));
+
 
     // Use our vector-accumulating GEM to compute A1
     GEMM_vector_kernel<Sigmoid><<<gridSize, blockSize>>>(
@@ -227,8 +256,8 @@ int myFeedForward(deviceCache &d, double* X, int N)
 
     // Step 2a: Second layer. We want to compute A2. We start by storing Z2 in
     // the space of A2
-    gridSize.x = (L + blockSize.x - 1)/blockSize.x;  
-    gridSize.y = (N + blockSize.y - 1)/blockSize.y;
+    gridSize.x  = std::min((int)((L + blockSize.x - 1)/blockSize.x), MAX_GRID_SIZE);
+    gridSize.y  = std::min((int)((N + blockSize.y - 1)/blockSize.y), MAX_GRID_SIZE);
     GEMM_vector_kernel<Identity><<<gridSize, blockSize>>>(
         W2, A1, A2, b2, L, N, M);
     check_launch("GEMM_vector_kernel layer2");
@@ -237,7 +266,8 @@ int myFeedForward(deviceCache &d, double* X, int N)
     // in A2) to get the correct A2 = yhat.
     blockSize.x = 256;
     blockSize.y = 1;
-    gridSize.x  = (N + blockSize.x - 1)/blockSize.x;
+    gridSize.x  = std::min((int)((N + blockSize.x - 1)/blockSize.x),
+                           MAX_GRID_SIZE);
     gridSize.y  = 1;
     softmax_kernel<<<gridSize, blockSize>>>(A2, L, N);
     check_launch("softmax_kernel");
@@ -245,9 +275,7 @@ int myFeedForward(deviceCache &d, double* X, int N)
     return 0;
 }
 
-/******************************************************************************\
- * Section 4: Back Propogation Special Functions                              *
-\******************************************************************************/
+
 
 /**
  * \brief Computes the difference yhat - y in the back propogation and stores
@@ -260,10 +288,17 @@ void backPropDiff_kernel(double *yhat, double *y, int L, int N)
 {
     int col = blockIdx.x*blockDim.x + threadIdx.x;
 
-    if (col < N)
+    int num_cols = (N - col + (blockDim.x * gridDim.x - 1)) /
+                   (blockDim.x * gridDim.x);
+
+    int curr_col;
+
+    for(int c = 0; c < num_cols; c++)
     {
+        curr_col = col + c*blockDim.x*gridDim.x;
         for(int i = 0; i < L; i++)
-            yhat[col*L + i] = (yhat[col*L + i] -  y[col*L + i])/N;
+            yhat[curr_col*L + i] = (yhat[curr_col*L + i] 
+                                  - y[curr_col*L + i])/N;
     }
 }
 
@@ -272,9 +307,15 @@ __global__
 void vector_scale_kernel(double *v, int M, int scale)
 {
     int row = blockIdx.x*blockDim.x + threadIdx.x;
-
-    if(row < M)
-        v[row] *= scale;
+    int num_rows = (M - row + (blockDim.x * gridDim.x - 1)) /
+                   (blockDim.x * gridDim.x);
+    int curr_row;
+    
+    for(int c = 0; c < num_rows; c++)
+    {
+        curr_row = row + c*blockDim.x*gridDim.x;
+        v[curr_row] *= scale;
+    }
 }
 
 __global__
@@ -283,8 +324,23 @@ void matrix_scale_kernel(double *A, int M, int N, int scale)
     int row = blockIdx.x*blockDim.x + threadIdx.x;
     int col = blockIdx.y*blockDim.y + threadIdx.y;
 
-    if((row < M) && (col < N))
-        A[row + M*col] *= scale;
+    int num_rows = (M - row + (blockDim.x * gridDim.x - 1)) /
+                   (blockDim.x * gridDim.x);
+
+    int num_cols = (N - col + (blockDim.y * gridDim.y - 1)) /
+                   (blockDim.y * gridDim.y);
+
+    int curr_row, curr_col;
+
+    for(int i = 0; i < num_rows; i++)
+    {
+        curr_row = row + i*blockDim.x*gridDim.x;
+        for(int j = 0; j < num_cols; j++)
+        {
+            curr_col = col + j*blockDim.y*gridDim.y;
+            A[curr_row + M*curr_col] *= scale;
+        }
+    }
 }
 
 /**
@@ -293,15 +349,19 @@ void matrix_scale_kernel(double *A, int M, int N, int scale)
  *
  * This could be modified to be algorithmically faster, but there may be more
  * associated memory traffic.
- *
  */
 __global__
 void myRowSum_kernel(double *A, int M, int N, int stride, int num_iter)
 {
     int row = blockIdx.x*blockDim.x + threadIdx.x;
+    int num_rows = (M - row + (blockDim.x * gridDim.x - 1)) /
+                   (blockDim.x * gridDim.x);
+    int curr_row;
 
-    if (row < M)
+    for(int i = 0; i < num_rows; i++)
     {
+        curr_row = row + i*blockDim.x*gridDim.x;
+
         int start_col = (blockIdx.y*blockDim.y + threadIdx.y)*stride*num_iter;
         int end_col   = (blockIdx.y*blockDim.y + threadIdx.y+1)*stride*num_iter;
 
@@ -309,10 +369,10 @@ void myRowSum_kernel(double *A, int M, int N, int stride, int num_iter)
         for(int col = end_col-stride; col >= start_col; col -= stride)
         {
             if(col < N)
-                sum += A[col*M + row];
+                sum += A[col*M + curr_row];
         }
         if(start_col < N)
-            A[start_col*M + row] = sum;
+            A[start_col*M + curr_row] = sum;
     }
 }
 
@@ -320,10 +380,13 @@ void myRowSum(double *A, int M, int N)
 {
     dim3 blockSize (BLOCK_SIZE, BLOCK_SIZE);
 
-    int num_iters = 4;
+    // Define num_iters to ensure that our gridsize is not larger than the max
+    // possible.
+    int num_iters = std::max(4, (N + MAX_GRID_SIZE - 1) / MAX_GRID_SIZE);
     int stride = 1;
-
-    dim3 gridSize ((M + blockSize.x - 1)/blockSize.x,
+    
+    dim3 gridSize (std::min((int)((M + blockSize.x - 1)/blockSize.x),
+                   MAX_GRID_SIZE),
                    (N + (blockSize.y*stride*num_iters) - 1) /
                         (blockSize.y*stride*num_iters));
 
@@ -342,13 +405,13 @@ void myRowSum(double *A, int M, int N)
 
     blockSize.x = 256;
     blockSize.y = 1;
-    gridSize.x = (M + blockSize.x - 1)/blockSize.x;
+    gridSize.x = std::min((int)((M + blockSize.x - 1)/blockSize.x),
+                          MAX_GRID_SIZE);
     gridSize.y = 1;
 
     vector_scale_kernel<<<gridSize, blockSize>>>(A, M, N);
     check_launch("vector_scale_kernel");
 }
-
 
 /**
  * \brief Kernel which performs the special Hadamard product present in the back
@@ -358,17 +421,31 @@ void myRowSum(double *A, int M, int N)
  */
 __global__
 void mySpecialHadamard_kernel(double *dA1, double *A1, 
-                              int M, int N) {
+                              int M, int N) 
+{
     int row = blockIdx.x*blockDim.x + threadIdx.x;
     int col = blockIdx.y*blockDim.y + threadIdx.y;
 
-    if ((row < M) && (col < N))
+    int num_rows = (M - row + (blockDim.x * gridDim.x - 1)) /
+                   (blockDim.x * gridDim.x);
+
+    int num_cols = (N - col + (blockDim.y * gridDim.y - 1)) /
+                   (blockDim.y * gridDim.y);
+
+    int curr_row, curr_col;
+
+    for(int i = 0; i < num_rows; i++)
     {
-        double A1_elem   =  A1[M*col + row];
-        dA1[M*col + row] = dA1[M*col + row] * A1_elem * (1 - A1_elem);
+        curr_row = row + i*blockDim.x*gridDim.x;
+        for(int j = 0; j < num_cols; j++)
+        {
+            curr_col = col + j*blockDim.y*gridDim.y;
+            double A1_elem   =  A1[M*curr_col + curr_row];
+            dA1[M*curr_col + curr_row] = dA1[M*curr_col + curr_row]
+                                       * A1_elem * (1 - A1_elem);
+        }
     }
 }
-
 
 __global__
 void onDeviceCopy_kernel(double *A, double *B, int M, int N)
@@ -376,23 +453,34 @@ void onDeviceCopy_kernel(double *A, double *B, int M, int N)
     int row = blockIdx.x*blockDim.x + threadIdx.x;
     int col = blockIdx.y*blockDim.y + threadIdx.y;
 
-    if ((row < M) && (col < N))
+    int num_rows = (M - row + (blockDim.x * gridDim.x - 1)) /
+                   (blockDim.x * gridDim.x);
+
+    int num_cols = (N - col + (blockDim.y * gridDim.y - 1)) /
+                   (blockDim.y * gridDim.y);
+
+    int curr_row, curr_col;
+
+    for(int i = 0; i < num_rows; i++)
     {
-        A[col*M + row] = B[col*M + row];
+        curr_row = row + i*blockDim.x*gridDim.x;
+        for(int j = 0; j < num_cols; j++)
+        {
+            curr_col = col + j*blockDim.y*gridDim.y;
+            A[curr_col*M + curr_row] = B[curr_col*M + curr_row];
+        }
     }
 }
 
 void onDeviceCopy(double *A, double *B, int M, int N)
 {
     dim3 blockSize (BLOCK_SIZE, BLOCK_SIZE);
-    dim3 gridSize ((M + blockSize.x - 1)/blockSize.x,
-                   (N + blockSize.y - 1)/blockSize.y);
+    dim3 gridSize (std::min((int)((M + blockSize.x - 1)/blockSize.x), MAX_GRID_SIZE),
+                   std::min((int)((N + blockSize.y - 1)/blockSize.y), MAX_GRID_SIZE));
 
     onDeviceCopy_kernel<<<gridSize,blockSize>>>(A, B, M, N);
     check_launch("onDeviceCopy kernel");
 }
-
-
 
 /**
  * \brief Function for carrying out the back propogation
@@ -427,7 +515,8 @@ int myBackPropogation(deviceCache &d, double *X, double *y, int N, double reg)
 
     // Step 1: Find the difference yhat - y
     dim3 blockSize (256, 1); 
-    dim3 gridSize ((N + blockSize.x - 1)/blockSize.x, 1);
+    dim3 gridSize (std::min((int)((N + blockSize.x - 1)/blockSize.x),
+                   MAX_GRID_SIZE), 1);
 
     backPropDiff_kernel<<<gridSize,blockSize>>>(diff, y, L, N);           ////// 
     check_launch("backPropDiff kernel");
@@ -436,8 +525,8 @@ int myBackPropogation(deviceCache &d, double *X, double *y, int N, double reg)
     onDeviceCopy(dW2, W2, L, M);
     blockSize.x = BLOCK_SIZE;
     blockSize.y = BLOCK_SIZE;
-    gridSize.x  = (L + blockSize.x - 1)/blockSize.x;
-    gridSize.y  = (M + blockSize.y - 1)/blockSize.y;
+    gridSize.x  = std::min((int)((L + blockSize.x - 1)/blockSize.x), MAX_GRID_SIZE);
+    gridSize.y  = std::min((int)((M + blockSize.y - 1)/blockSize.y), MAX_GRID_SIZE);
 
     // Include offset, transpose A1
     myGEMM_kernel<Identity, true, false, true><<<gridSize, blockSize>>>(
@@ -445,11 +534,11 @@ int myBackPropogation(deviceCache &d, double *X, double *y, int N, double reg)
     check_launch("myGEMM_kernel");
 
     matrix_scale_kernel<<<gridSize, blockSize>>>(dW2, L, M, N);
-    check_launch("matrix_scale_kernel");
+    //check_launch("matrix_scale_kernel");
 
     // Step 3: Compute dA1
-    gridSize.x  = (M + blockSize.x - 1)/blockSize.x;
-    gridSize.y  = (N + blockSize.y - 1)/blockSize.y;
+    gridSize.x  = std::min((int)((M + blockSize.x - 1)/blockSize.x), MAX_GRID_SIZE);
+    gridSize.y  = std::min((int)((N + blockSize.y - 1)/blockSize.y), MAX_GRID_SIZE);
     // Do not include offset, transpose W2
     myGEMM_kernel<Identity, false, true, false><<<gridSize, blockSize>>>(
         W2, diff, dA1, 1, 1, M, N, L);                                    ////// 
@@ -461,9 +550,6 @@ int myBackPropogation(deviceCache &d, double *X, double *y, int N, double reg)
                 // We can just do this.                                   ////// 
     d.db2 = db2;
 
-    
-
-
     // Step 5: Compute dZ1
     // Gridsize is still fine
     mySpecialHadamard_kernel<<<gridSize, blockSize>>>(dZ1, A1, M, N);     ////// 
@@ -471,15 +557,15 @@ int myBackPropogation(deviceCache &d, double *X, double *y, int N, double reg)
 
     // Step 6: Compute dW1
     onDeviceCopy(dW1, W1, M, K);
-    gridSize.x  = (M + blockSize.x - 1)/blockSize.x;
-    gridSize.y  = (K + blockSize.y - 1)/blockSize.y;
+    gridSize.x  = std::min((int)((M + blockSize.x - 1)/blockSize.x), MAX_GRID_SIZE);
+    gridSize.y  = std::min((int)((K + blockSize.y - 1)/blockSize.y), MAX_GRID_SIZE);
     // Include offset, transpose X
     myGEMM_kernel<Identity, true, false, true><<<gridSize, blockSize>>>(
         dZ1, X, dW1, 1, reg, M, K, N);                                    //////
     check_launch("myGEMM_kernel");
 
     matrix_scale_kernel<<<gridSize, blockSize>>>(dW1, M, K, N);
-    check_launch("matrix_scale_kernel");
+    //check_launch("matrix_scale_kernel");
 
     // Step 7: Compute db1
     myRowSum(dZ1, M, N);
@@ -489,11 +575,9 @@ int myBackPropogation(deviceCache &d, double *X, double *y, int N, double reg)
     return 0;
 }
 
-
 /******************************************************************************\
  * Section 5: Gradient Descent Special Functions                              *
 \******************************************************************************/
-
 
 /**
  * \brief GPU kernel for performing the gradient descent update.
@@ -505,10 +589,23 @@ void grad_descent_kernel(double *W_or_b, double *grad, double learning_rate,
     int row = blockIdx.x*blockDim.x + threadIdx.x;
     int col = blockIdx.y*blockDim.y + threadIdx.y;
 
-    if ((row < M) && (col < N))
+    int num_rows = (M - row + (blockDim.x * gridDim.x - 1)) /
+                   (blockDim.x * gridDim.x);
+
+    int num_cols = (N - col + (blockDim.y * gridDim.y - 1)) /
+                   (blockDim.y * gridDim.y);
+
+    int curr_row, curr_col;
+
+    for(int i = 0; i < num_rows; i++)
     {
-        W_or_b[col*M + row] -= learning_rate 
-                             * (grad[col*M + row]/normalization);
+        curr_row = row + i*blockDim.x*gridDim.x;
+        for(int j = 0; j < num_cols; j++)
+        {
+            curr_col = col + j*blockDim.y*gridDim.y;
+            W_or_b[curr_col*M + curr_row] -= learning_rate 
+                * (grad[curr_col*M + curr_row]/normalization);
+        }
     }
 }
 
@@ -519,15 +616,15 @@ void myGradientDescent(deviceCache &d, double learning_rate, int N)
 {
     // Step 1: Update W1
     dim3 blockSize (BLOCK_SIZE, BLOCK_SIZE);
-    dim3 gridSize  ((d.M + blockSize.x - 1)/blockSize.x,
-                    (d.K + blockSize.y - 1)/blockSize.y); 
+    dim3 gridSize  (std::min((int)((d.M + blockSize.x - 1)/blockSize.x), MAX_GRID_SIZE),
+                    std::min((int)((d.K + blockSize.y - 1)/blockSize.y), MAX_GRID_SIZE)); 
     grad_descent_kernel<<<gridSize, blockSize>>>(d.W1, d.dW1, learning_rate,
                                                  d.M, d.K, N);
     check_launch("grad_descent_kernel");
 
     // Step 2: Update W2
-    gridSize.x = (d.L + blockSize.x - 1)/blockSize.x;
-    gridSize.y = (d.M + blockSize.y - 1)/blockSize.y;
+    gridSize.x = std::min((int)((d.L + blockSize.x - 1)/blockSize.x), MAX_GRID_SIZE);
+    gridSize.y = std::min((int)((d.M + blockSize.y - 1)/blockSize.y), MAX_GRID_SIZE);
     grad_descent_kernel<<<gridSize, blockSize>>>(d.W2, d.dW2, learning_rate,
                                                  d.L, d.M, N);
     check_launch("grad_descent_kernel");
@@ -535,7 +632,7 @@ void myGradientDescent(deviceCache &d, double learning_rate, int N)
     // Step 3: Update b1
     blockSize.x = 256;
     blockSize.y = 1;
-    gridSize.x = (d.M + blockSize.x - 1)/blockSize.x;
+    gridSize.x = std::min((int)((d.M + blockSize.x - 1)/blockSize.x), MAX_GRID_SIZE);
     gridSize.y = 1;
     grad_descent_kernel<<<gridSize, blockSize>>>(d.b1, d.db1, learning_rate,
                                                  d.M, 1, N);
@@ -543,7 +640,7 @@ void myGradientDescent(deviceCache &d, double learning_rate, int N)
 
 
     // Step 4: Update b2
-    gridSize.x = (d.L + blockSize.x - 1)/blockSize.x;
+    gridSize.x = std::min((int)((d.L + blockSize.x - 1)/blockSize.x), MAX_GRID_SIZE);
     grad_descent_kernel<<<gridSize, blockSize>>>(d.b2, d.db2, learning_rate,
                                                  d.L, 1, N);
 

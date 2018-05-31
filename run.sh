@@ -36,6 +36,6 @@ echo Output from code
 echo ----------------
 
 # mpirun -np 4 ./main -s -n 1000 -b 800 -l 0.01 -e 20
-#mpirun -np 4 ./main -n 20 -e 3 -sd
+# mpirun -np 4 ./main -n 20 -e 3 -sd
 #mpirun -np 4 ./main
-MV2_USE_CUDA=1 mpirun -np 4 nvprof --output-profile profile.%p.nvprof ./main
+MV2_USE_CUDA=1 mpirun -np 4 nvprof --output-profile profile.%p.nvprof ./main 
