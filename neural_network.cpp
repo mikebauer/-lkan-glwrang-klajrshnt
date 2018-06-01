@@ -322,7 +322,6 @@ void update_deviceCache_from_nn(NeuralNetwork& nn, deviceCache& dCache)
 
 
 /*
- * TODO
  * Train the neural network &nn of rank 0 in parallel. Your MPI implementation
  * should mainly be in this function.
  */
@@ -359,7 +358,6 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
        and therefore goes from 0 to epochs*num_batches */
     int iter = 0;
 
-    // TODO Check mallocs
     double *dW1 = (double *)malloc(M*K*sizeof(double));
     double *db1 = (double *)malloc(M*sizeof(double));
     double *dW2 = (double *)malloc(L*M*sizeof(double));
@@ -376,6 +374,14 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
     double *X_proc = (double *)malloc(K*N_proc*sizeof(double));
     double *y_proc = (double *)malloc(L*N_proc*sizeof(double));
 
+    // Check the mallocs
+    if(((dW1   == 0) || (db1   == 0) || (dW2   == 0) || (db2   == 0) ||
+        (dW1_g == 0) || (db1_g == 0) || (dW2_g == 0) || (db2_g == 0) ||
+        (X_proc == 0) || (y_proc == )))
+    {
+        std::cerr << "ERROR: Host allocation failure!" << std::endl;
+    }
+
     double *dX_proc;
     double *dy_proc;
 
@@ -391,15 +397,8 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
         int num_batches = (N + batch_size - 1)/batch_size;
 
         for(int batch = 0; batch < num_batches; ++batch) {
-            /*
-             * Possible Implementation:
-             * 1. subdivide input batch of images and `MPI_scatter()' to each MPI node
-             * 2. compute each sub-batch of images' contribution to network coefficient updates
-             * 3. reduce the coefficient updates and broadcast to all nodes with `MPI_Allreduce()'
-             * 4. update local network coefficient at each node
-             */
-
-
+            
+            // Find the X and y values from this batch 
             int last_col = std::min((batch + 1)*batch_size-1, N-1);
             int N_batch  = std::min((batch + 1)*batch_size, N) 
                          - batch*batch_size;
@@ -407,9 +406,11 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
             double *X_batch = (double *)X.memptr() + batch*batch_size*K;
             double *y_batch = (double *)y.memptr() + batch*batch_size*L;
 
+            // Find the max number of images per proc
             N_proc = (N_batch + (num_procs - 1)) / 
                       num_procs;
 
+            // Find the sendcounts and displacements for each process
             for(int i = 0; i < num_procs; i++)
             {
                 X_sendcounts[i] = (std::min((i + 1) * N_proc, N_batch) 
@@ -419,23 +420,28 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
                 X_displs[i] = i*N_proc*K;
                 y_displs[i] = i*N_proc*L;
             }
+            // Find N_proc for this process
             N_proc = std::min((rank + 1) * N_proc, N_batch) - rank*N_proc;
 
+            // Scatter this batch of X and y values to all processes
             MPI_Scatterv(X_batch, X_sendcounts, X_displs, MPI_DOUBLE, X_proc, 
                          X_sendcounts[rank], MPI_DOUBLE, 0, MPI_COMM_WORLD);
 
             MPI_Scatterv(y_batch, y_sendcounts, y_displs, MPI_DOUBLE, y_proc, 
                          y_sendcounts[rank], MPI_DOUBLE, 0, MPI_COMM_WORLD);
 
+            // Copy this batches X and y values to the device
             checkCudaErrors(cudaMemcpy(dX_proc, X_proc, K*N_proc*sizeof(double),
                                        cudaMemcpyHostToDevice));
 
             checkCudaErrors(cudaMemcpy(dy_proc, y_proc, L*N_proc*sizeof(double),
                                        cudaMemcpyHostToDevice));
 
+            // Feed forward and back propogate on the device
             myFeedForward(dCache, dX_proc, N_proc); 
             myBackPropogation(dCache, dX_proc, dy_proc, N_proc, reg);
 
+            // Copy the gradients back to the host
             checkCudaErrors(cudaMemcpy(dW1, dCache.dW1, M*K*sizeof(double), 
                             cudaMemcpyDeviceToHost));
             checkCudaErrors(cudaMemcpy(db1, dCache.db1, M*sizeof(double),   
@@ -445,6 +451,7 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
             checkCudaErrors(cudaMemcpy(db2, dCache.db2, L*sizeof(double),   
                             cudaMemcpyDeviceToHost));
 
+            // Allreduce the gradients
             MPI_SAFE_CALL(MPI_Allreduce(dW1, dW1_g, M*K, MPI_DOUBLE, MPI_SUM, 
                                         MPI_COMM_WORLD));
             MPI_SAFE_CALL(MPI_Allreduce(db1, db1_g, M,   MPI_DOUBLE, MPI_SUM, 
@@ -454,6 +461,7 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
             MPI_SAFE_CALL(MPI_Allreduce(db2, db2_g, L,   MPI_DOUBLE, MPI_SUM, 
                                         MPI_COMM_WORLD));
 
+            // Copy the reduced gradients back to the device
             checkCudaErrors(cudaMemcpy(dCache.dW1, dW1_g, M*K*sizeof(double), 
                                        cudaMemcpyHostToDevice));
             checkCudaErrors(cudaMemcpy(dCache.db1, db1_g, M*sizeof(double),   
@@ -463,8 +471,10 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
             checkCudaErrors(cudaMemcpy(dCache.db2, db2_g, L*sizeof(double),   
                                        cudaMemcpyHostToDevice));
 
+            // Perform gradient descent on the device
             myGradientDescent(dCache, learning_rate, N_batch);
 
+            // Update the host data in the neural network on proc 0 
             if(rank == 0)
                 update_nn_from_deviceCache(nn, dCache);
 
