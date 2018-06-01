@@ -377,9 +377,10 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
     // Check the mallocs
     if(((dW1   == 0) || (db1   == 0) || (dW2   == 0) || (db2   == 0) ||
         (dW1_g == 0) || (db1_g == 0) || (dW2_g == 0) || (db2_g == 0) ||
-        (X_proc == 0) || (y_proc == )))
+        (X_proc == 0) || (y_proc == 0)))
     {
         std::cerr << "ERROR: Host allocation failure!" << std::endl;
+        exit(1);
     }
 
     double *dX_proc;
