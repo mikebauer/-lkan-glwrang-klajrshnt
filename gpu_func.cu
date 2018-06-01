@@ -11,12 +11,24 @@
  * Section 1: Helper Structs                                                  *
 \******************************************************************************/
 
+/**
+ * \brief Identity operation.
+ * 
+ * This struct contains the identity operation so this operation can be accessed
+ * via template.
+ */
 struct Identity
 {
     __device__
     static double func(double x) {return x;}
 };
 
+/**
+ * \brief Sigmoid operation.
+ * 
+ * This struct contains the sigmoid operation so this operation can be accessed
+ * via template.
+ */
 struct Sigmoid
 {
     __device__
@@ -61,7 +73,17 @@ int useless_gpu_add_one(int t) {
  * the time being. The operation PostOp::func is applied to each element in C
  * after the product has been found. In some cases, the offset is not necessary
  * so we use set the IncludeOffset to false so we do not have to waste a memory
- * access to C.
+ * access to C. Furthermore, we have additional template arguments which tell us
+ * whether to transpose matrix A before multiplication and whether to transpose
+ * matrix B before multiplication.
+ *
+ * arguments:
+ *     A, B, C, alpha, beta: Matrices and scalars in the general GEMM framework:
+ *     C <- alpha*A*B + beta*C
+ *
+ *     M: Number of rows in A and C
+ *     N: Number of columns in C and B
+ *     K: Number of columns in A and rows in B
  */
 template<class PostOp, bool IncludeOffset, bool TransposeA, bool TransposeB>
 __global__ void myGEMM_kernel(double *A, double *B, double *C,
@@ -71,6 +93,8 @@ __global__ void myGEMM_kernel(double *A, double *B, double *C,
     int row = blockIdx.x*blockDim.x + threadIdx.x;
     int col = blockIdx.y*blockDim.y + threadIdx.y;
 
+    // Number of rows and columns this thread must compute so that the whole
+    // matrix ends up getting computed.
     int num_rows = (M - row + (blockDim.x * gridDim.x - 1)) /
                    (blockDim.x * gridDim.x);
 
@@ -143,11 +167,17 @@ int myGEMM(double* A, double* B, double* C, double* alpha, double* beta, int M,
 /**
  * \brief Kernel for Matrix multiplication with vector accumulator.
  *
- * See myFeedForward for more details. We have used this Naive implementation
- * for the time being. The operation PostOp::func is applied to each element in
- * C after the product has been found. In some cases, the offset is not
- * necessary so we use set the IncludeOffset to false so we do not have to waste
- * a memory access to C.
+ * We have used this Naive GEMM implementation for the time being. The operation
+ * PostOp::func is applied to each element in C after the product has been
+ * found.
+ *
+ * Arguments:
+ *     A, B, C, v, alpha, beta: Matrices, vectors, and scalars in the framework:
+ *     C <- alpha*A*B + beta*[ v v v ... v]
+ *
+ *     M: Number of rows in A, C and v
+ *     N: Number of columns in C and B and the matrix [ v v v ... v ]
+ *     K: Number of columns in A and rows in B
  */
 template<class PostOp>
 __global__ void GEMM_vector_kernel(double *A, double *B, double *C, double *v,
@@ -156,6 +186,8 @@ __global__ void GEMM_vector_kernel(double *A, double *B, double *C, double *v,
     int row = blockIdx.x*blockDim.x + threadIdx.x;
     int col = blockIdx.y*blockDim.y + threadIdx.y;
 
+    // Number of rows and columns this thread must compute so that the whole
+    // matrix ends up getting computed.
     int num_rows = (M - row + (blockDim.x * gridDim.x - 1)) /
                    (blockDim.x * gridDim.x);
 
@@ -202,6 +234,9 @@ __global__ void softmax_kernel(double *Z2, int L, int N)
 {
     int col = blockIdx.x*blockDim.x + threadIdx.x;
 
+
+    // Number of columns this thread must compute so that the whole
+    // matrix ends up getting computed.
     int num_cols = (N - col + (blockDim.x * gridDim.x - 1)) /
                    (blockDim.x * gridDim.x);
     int curr_col;
@@ -220,13 +255,14 @@ __global__ void softmax_kernel(double *Z2, int L, int N)
 
 }
 
-/*
- * \brief Routine to perform Matrix multiplication with a vector-valued
- * accumulator (instead of the Matrix-valued accumulator in GEMM). 
- * 
- *  TODO Fix these comments
+/**
+ * \brief Wrapper to perform the feed-forward operation on device memory.
  *
- * Note that A, B, C, and v are pointers to device memory
+ * arguments:
+ *     d - A deviceCache (see gpu_func.h) containing pointers to all of the
+ *         relevant neural network parameters.
+ *     X - A pointer to a matrix of training images.
+ *     N - The number of images (i.e. columns in X)
  */
 int myFeedForward(deviceCache &d, double* X, int N)
 {
@@ -275,19 +311,25 @@ int myFeedForward(deviceCache &d, double* X, int N)
     return 0;
 }
 
-
-
 /**
  * \brief Computes the difference yhat - y in the back propogation and stores
  * the result in yhat.
  *  
- * Use blocks of 1x256 for this kernel
+ * Use blocks of 256x1 for this kernel.
+ * 
+ * arguments:
+ *     yhat - The result of the neural network feed forward.
+ *     y    - The correct results for each image
+ *     L    - The number of rows in y and yhat
+ *     N    - The number of columns in y and yhat
  */
 __global__
 void backPropDiff_kernel(double *yhat, double *y, int L, int N)
 {
     int col = blockIdx.x*blockDim.x + threadIdx.x;
 
+    // Number of columns this thread must compute so that the whole matrix ends
+    // up getting computed.
     int num_cols = (N - col + (blockDim.x * gridDim.x - 1)) /
                    (blockDim.x * gridDim.x);
 
@@ -303,10 +345,24 @@ void backPropDiff_kernel(double *yhat, double *y, int L, int N)
 }
 
 
+/**
+ * \brief Scales a vector by an integer scale.
+ *
+ * This kernel is useful for scaling the gradients of b1 and b2 before they are
+ * accumulated with gradients from other processes.
+ * 
+ * arguments:
+ *     v     - pointer to the vector to scale
+ *     M     - the number of rows in v
+ *     scale - the integer to scale v by
+ */
 __global__
 void vector_scale_kernel(double *v, int M, int scale)
 {
     int row = blockIdx.x*blockDim.x + threadIdx.x;
+
+    // Number of rows this thread must compute so that the whole matrix ends up
+    // getting computed.
     int num_rows = (M - row + (blockDim.x * gridDim.x - 1)) /
                    (blockDim.x * gridDim.x);
     int curr_row;
@@ -318,12 +374,27 @@ void vector_scale_kernel(double *v, int M, int scale)
     }
 }
 
+
+/**
+ * \brief Scales a matrix by an integer scale.
+ *
+ * This kernel is useful for scaling the gradients of W1 and W2 before they are
+ * accumulated with gradients from other processes.
+ * 
+ * arguments:
+ *     A     - pointer to the matrix to scale
+ *     M     - the number of rows in A
+ *     N     - the number of rows in A
+ *     scale - the integer to scale v by
+ */
 __global__
 void matrix_scale_kernel(double *A, int M, int N, int scale)
 {
     int row = blockIdx.x*blockDim.x + threadIdx.x;
     int col = blockIdx.y*blockDim.y + threadIdx.y;
 
+    // Number of rows and columns this thread must compute so that the whole
+    // matrix ends up getting computed.
     int num_rows = (M - row + (blockDim.x * gridDim.x - 1)) /
                    (blockDim.x * gridDim.x);
 
@@ -345,15 +416,23 @@ void matrix_scale_kernel(double *A, int M, int N, int scale)
 
 /**
  * \brief Kernel for summing by row to get a column vector in the first column
- * of the array A.
+ * of the array A. Does only part of the sum: must be called multiply times (see
+ * myRowSum below) to compute the row sum.
  *
- * This could be modified to be algorithmically faster, but there may be more
- * associated memory traffic.
+ * arguments:
+ *     A        - the array to sum the rows of
+ *     M        - the number of rows in A
+ *     N        - the number of columns in A
+ *     stride   - the stride between adjacent terms summed by a single thread
+ *     num_iter - the number of terms for each thread to sum
  */
 __global__
 void myRowSum_kernel(double *A, int M, int N, int stride, int num_iter)
 {
     int row = blockIdx.x*blockDim.x + threadIdx.x;
+
+    // The number of rows that this thread must compute to ensure all rows get
+    // covered.
     int num_rows = (M - row + (blockDim.x * gridDim.x - 1)) /
                    (blockDim.x * gridDim.x);
     int curr_row;
@@ -362,9 +441,12 @@ void myRowSum_kernel(double *A, int M, int N, int stride, int num_iter)
     {
         curr_row = row + i*blockDim.x*gridDim.x;
 
+        // Compute the first and last column that this column includes in the
+        // sum.
         int start_col = (blockIdx.y*blockDim.y + threadIdx.y)*stride*num_iter;
         int end_col   = (blockIdx.y*blockDim.y + threadIdx.y+1)*stride*num_iter;
 
+        // Sum from the last column to the first with the appropriate stride.
         double sum = 0; 
         for(int col = end_col-stride; col >= start_col; col -= stride)
         {
@@ -376,6 +458,16 @@ void myRowSum_kernel(double *A, int M, int N, int stride, int num_iter)
     }
 }
 
+/**
+ * \brief Sums by row to get a column vector in the first column of the array A.
+ *
+ * Uses myRowSum_kernel repeatedly to compute the row sum.
+ *
+ * arguments:
+ *     A - matrix to sum the rows of
+ *     M - number of rows in A
+ *     N - number of columns in A
+ */
 void myRowSum(double *A, int M, int N)
 {
     dim3 blockSize (BLOCK_SIZE, BLOCK_SIZE);
@@ -390,6 +482,10 @@ void myRowSum(double *A, int M, int N)
                    (N + (blockSize.y*stride*num_iters) - 1) /
                         (blockSize.y*stride*num_iters));
 
+
+    // Call myRowSum_kernel repeatedly until all values have been summed into
+    // the first row. We need to adjust the gridSize as we go because the number
+    // of columns we need to sum is reduced on each iteration.
     myRowSum_kernel<<<gridSize, blockSize>>>(A, M, N, stride, num_iters);
     check_launch("myRowSum_kernel");
 
@@ -418,6 +514,12 @@ void myRowSum(double *A, int M, int N)
  * propogation.
  *
  * Note that dZ1 is stored in the memory occupied initially by dA1.
+ *
+ * arguments:
+ *     dA1 - dA1 in the Hadamard product
+ *     A1  - A1 in the Hadamard product
+ *     M   - the number of rows in dA1 and A1
+ *     N   - the number of columns in dA1 and A1
  */
 __global__
 void mySpecialHadamard_kernel(double *dA1, double *A1, 
@@ -426,6 +528,8 @@ void mySpecialHadamard_kernel(double *dA1, double *A1,
     int row = blockIdx.x*blockDim.x + threadIdx.x;
     int col = blockIdx.y*blockDim.y + threadIdx.y;
 
+    // Number of rows and columns this thread must compute so that the whole
+    // matrix ends up getting computed.
     int num_rows = (M - row + (blockDim.x * gridDim.x - 1)) /
                    (blockDim.x * gridDim.x);
 
@@ -447,12 +551,24 @@ void mySpecialHadamard_kernel(double *dA1, double *A1,
     }
 }
 
+
+/**
+ * \brief Copies a matrix B to the area pointed to by A.
+ *
+ * arguments:
+ *     A - the place to copy to
+ *     B - the matrix to copy from
+ *     M - the number of rows in A and B
+ *     N - the number of columns in A and B
+ */
 __global__
 void onDeviceCopy_kernel(double *A, double *B, int M, int N)
 {
     int row = blockIdx.x*blockDim.x + threadIdx.x;
     int col = blockIdx.y*blockDim.y + threadIdx.y;
 
+    // Number of rows and columns this thread must compute so that the whole
+    // matrix ends up getting computed.
     int num_rows = (M - row + (blockDim.x * gridDim.x - 1)) /
                    (blockDim.x * gridDim.x);
 
@@ -472,6 +588,15 @@ void onDeviceCopy_kernel(double *A, double *B, int M, int N)
     }
 }
 
+/**
+ * \brief Wrapper which copies a matrix from B to A using onDeviceCopy_kernel.
+ * 
+ * arguments:
+ *     A - the place to copy to
+ *     B - the matrix to copy from
+ *     M - the number of rows in A and B
+ *     N - the number of columns in A and B
+ */
 void onDeviceCopy(double *A, double *B, int M, int N)
 {
     dim3 blockSize (BLOCK_SIZE, BLOCK_SIZE);
@@ -485,13 +610,13 @@ void onDeviceCopy(double *A, double *B, int M, int N)
 /**
  * \brief Function for carrying out the back propogation
  *
- * Arguments are as follows:
- * dA1: The Jacobian of the objective function with respect to A1.
- * A1:  The matrix A1 cached from the feed forward process.
- * dZ1: Space where we can store the Jacobian of the objective function with
- *      respect to Z1 (i.e. our result).
- * M:   The number of rows in all of these matrices.
- * N:   The number of columns in all of these matrices.
+ * arguments:
+ *     d   - a deviceCache (see gpu_func.h) containing pointers to all of the
+ *           relevant neural network parameters
+ *     X   - a pointer to a matrix of training images
+ *     y   - a pointer to the matrix of image labels
+ *     N   - the number of images (i.e. columns in X and y)
+ *     reg - the regularization term
  */
 int myBackPropogation(deviceCache &d, double *X, double *y, int N, double reg)
 {
@@ -508,17 +633,15 @@ int myBackPropogation(deviceCache &d, double *X, double *y, int N, double reg)
 
     double *db1, *db2;
 
-
     double *diff = d.A2;
     double *dZ1 = d.dA1;
-
 
     // Step 1: Find the difference yhat - y
     dim3 blockSize (256, 1); 
     dim3 gridSize (std::min((int)((N + blockSize.x - 1)/blockSize.x),
                    MAX_GRID_SIZE), 1);
 
-    backPropDiff_kernel<<<gridSize,blockSize>>>(diff, y, L, N);           ////// 
+    backPropDiff_kernel<<<gridSize,blockSize>>>(diff, y, L, N);            
     check_launch("backPropDiff kernel");
 
     // Step 2: Compute dW2
@@ -530,7 +653,7 @@ int myBackPropogation(deviceCache &d, double *X, double *y, int N, double reg)
 
     // Include offset, transpose A1
     myGEMM_kernel<Identity, true, false, true><<<gridSize, blockSize>>>(
-        diff, A1, dW2, 1, reg, L, M, N);                                  ////// 
+        diff, A1, dW2, 1, reg, L, M, N);                                   
     check_launch("myGEMM_kernel");
 
     matrix_scale_kernel<<<gridSize, blockSize>>>(dW2, L, M, N);
@@ -541,18 +664,18 @@ int myBackPropogation(deviceCache &d, double *X, double *y, int N, double reg)
     gridSize.y  = std::min((int)((N + blockSize.y - 1)/blockSize.y), MAX_GRID_SIZE);
     // Do not include offset, transpose W2
     myGEMM_kernel<Identity, false, true, false><<<gridSize, blockSize>>>(
-        W2, diff, dA1, 1, 1, M, N, L);                                    ////// 
+        W2, diff, dA1, 1, 1, M, N, L);                                     
     check_launch("myGEMM_kernel");
 
     // Step 4: Compute db2
     myRowSum(diff, L, N);
     db2 = diff; // Since everything is summed into the first row of diff, we can
-                // We can just do this.                                   ////// 
+                // We can just do this.                                    
     d.db2 = db2;
 
     // Step 5: Compute dZ1
     // Gridsize is still fine
-    mySpecialHadamard_kernel<<<gridSize, blockSize>>>(dZ1, A1, M, N);     ////// 
+    mySpecialHadamard_kernel<<<gridSize, blockSize>>>(dZ1, A1, M, N);      
     check_launch("mySpecialHadamard_kernel");
 
     // Step 6: Compute dW1
@@ -561,7 +684,7 @@ int myBackPropogation(deviceCache &d, double *X, double *y, int N, double reg)
     gridSize.y  = std::min((int)((K + blockSize.y - 1)/blockSize.y), MAX_GRID_SIZE);
     // Include offset, transpose X
     myGEMM_kernel<Identity, true, false, true><<<gridSize, blockSize>>>(
-        dZ1, X, dW1, 1, reg, M, K, N);                                    //////
+        dZ1, X, dW1, 1, reg, M, K, N);                                    
     check_launch("myGEMM_kernel");
 
     matrix_scale_kernel<<<gridSize, blockSize>>>(dW1, M, K, N);
@@ -569,7 +692,7 @@ int myBackPropogation(deviceCache &d, double *X, double *y, int N, double reg)
 
     // Step 7: Compute db1
     myRowSum(dZ1, M, N);
-    db1 = dZ1;                                                            //////
+    db1 = dZ1;                                                            
     d.db1 = db1;
     
     return 0;
@@ -581,6 +704,17 @@ int myBackPropogation(deviceCache &d, double *X, double *y, int N, double reg)
 
 /**
  * \brief GPU kernel for performing the gradient descent update.
+ *
+ * The normalization factor allows us to renormalize the gradients after all of
+ * our processes exchange and sum gradients. 
+ *
+ * arguments:
+ *     W_or_b        - the parameter that we subtracting the gradient from
+ *     grad          - the gradient that we are subtracting from W_or_b
+ *     learning_rate - the learning rate
+ *     M             - the number of rows in W_or_b
+ *     N             - the number of columns in W_or_b
+ *     normalization - a normalization integer to divide the gradeint by.
  */
 __global__
 void grad_descent_kernel(double *W_or_b, double *grad, double learning_rate,
@@ -589,6 +723,8 @@ void grad_descent_kernel(double *W_or_b, double *grad, double learning_rate,
     int row = blockIdx.x*blockDim.x + threadIdx.x;
     int col = blockIdx.y*blockDim.y + threadIdx.y;
 
+    // Number of rows and columns this thread must compute so that the whole
+    // matrix ends up getting computed.
     int num_rows = (M - row + (blockDim.x * gridDim.x - 1)) /
                    (blockDim.x * gridDim.x);
 
@@ -610,7 +746,13 @@ void grad_descent_kernel(double *W_or_b, double *grad, double learning_rate,
 }
 
 /**
- * \brief Performs the gradient descent update accelrated by the gpu
+ * \brief Performs the gradient descent update accelrated by the gpu.
+ * 
+ * arguments:
+ *     d             - a deviceCache (see gpu_func.h) containing pointers to 
+ *                     all of the
+ *     N             - the number of images in the whole batch
+ *     learning_rate - the learning rate for this training
  */
 void myGradientDescent(deviceCache &d, double learning_rate, int N)
 {
@@ -646,5 +788,3 @@ void myGradientDescent(deviceCache &d, double learning_rate, int N)
 
     check_launch("grad_descent_kernel");
 }
-
-

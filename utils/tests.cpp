@@ -247,8 +247,6 @@ void TestGEMM(int M, int N, int K) {
     cudaFree(dC2);
 }
 
-void testRowSum();
-
 void BenchmarkGEMM() {
 
     std::cout << std::endl << "Entering GEMM Benchmarking mode! Stand by."
@@ -268,41 +266,4 @@ void BenchmarkGEMM() {
               << N << "; K = " << K << std::endl;
     TestGEMM(M, N, K);
     std::cout << "Completed GEMM 2" << std::endl;
-
-
-    testRowSum();
 }
-
-
-/******************************************************************************\
- * CUSTOM TESTS                                                               *
-\******************************************************************************/
-
-
-
-void testRowSum()
-{
-    int M = 100;
-    int N = 2099;
-    arma::mat A (M, N, arma::fill::ones); 
-
-    double *dA;
-    cudaMalloc((void **)&dA, M*N*sizeof(double));
-    cudaMemcpy(dA, A.memptr(), M*N*sizeof(double), cudaMemcpyHostToDevice);
-
-    myRowSum(dA, M, N);
-
-    cudaMemcpy(A.memptr(), dA, M*N*sizeof(double), cudaMemcpyDeviceToHost);
-
-    cudaFree(dA);
-
-    for(int i = 0; i < M; i++)
-    {
-        if (N != A(i, 0))
-        {
-            std::cout << "ERROR: Row Sum Test Failed" << std::endl;
-        }
-    }
-}
-
-
