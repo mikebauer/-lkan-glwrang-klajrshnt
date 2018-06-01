@@ -398,53 +398,117 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
     int y_sendcounts[num_procs];
     int y_displs[num_procs];
 
+    MPI_Request X_req, y_req;
+
+    int last_col, N_batch, N_batch_next, N_proc_next;
+    double *X_batch, *y_batch;
+
     for(int epoch = 0; epoch < epochs; ++epoch) {
         int num_batches = (N + batch_size - 1)/batch_size;
 
         for(int batch = 0; batch < num_batches; ++batch) {
-            
-            // Find the X and y values from this batch 
-            int last_col = std::min((batch + 1)*batch_size-1, N-1);
-            int N_batch  = std::min((batch + 1)*batch_size, N) 
-                         - batch*batch_size;
-
-            double *X_batch = (double *)X.memptr() + batch*batch_size*K;
-            double *y_batch = (double *)y.memptr() + batch*batch_size*L;
-
-            // Find the max number of images per proc
-            N_proc = (N_batch + (num_procs - 1)) / 
-                      num_procs;
-
-            // Find the sendcounts and displacements for each process
-            for(int i = 0; i < num_procs; i++)
+           
+            if(batch == 0)
             {
-                X_sendcounts[i] = (std::min((i + 1) * N_proc, N_batch) 
-                                - i*N_proc)*K;
-                y_sendcounts[i] = (std::min((i + 1) * N_proc, N_batch) 
-                                - i*N_proc)*L;
-                X_displs[i] = i*N_proc*K;
-                y_displs[i] = i*N_proc*L;
+                // Find the X and y values from this batch 
+                last_col = std::min((batch + 1)*batch_size-1, N-1);
+                N_batch_next  = std::min((batch + 1)*batch_size, N) 
+                              - batch*batch_size;
+
+                X_batch = (double *)X.memptr() + batch*batch_size*K;
+                y_batch = (double *)y.memptr() + batch*batch_size*L;
+
+                // Find the max number of images per proc
+                N_proc_next = (N_batch_next + (num_procs - 1)) / 
+                          num_procs;
+
+                // Find the sendcounts and displacements for each process
+                for(int i = 0; i < num_procs; i++)
+                {
+                    X_sendcounts[i] = (std::min((i + 1) * N_proc_next, N_batch_next) 
+                                    - i*N_proc_next)*K;
+                    y_sendcounts[i] = (std::min((i + 1) * N_proc_next, N_batch_next) 
+                                    - i*N_proc_next)*L;
+                    X_displs[i] = i*N_proc_next*K;
+                    y_displs[i] = i*N_proc_next*L;
+                }
+                // Find N_proc for this process
+                N_proc_next = std::min((rank + 1) * N_proc_next, N_batch_next) 
+                            - rank*N_proc_next;
+
+                // Scatter this batch of X and y values to all processes
+                MPI_Iscatterv(X_batch, X_sendcounts, X_displs, MPI_DOUBLE, X_proc, 
+                             X_sendcounts[rank], MPI_DOUBLE, 0, MPI_COMM_WORLD,
+                             &X_req);
+
+                 
+                MPI_Iscatterv(y_batch, y_sendcounts, y_displs, MPI_DOUBLE, y_proc, 
+                              y_sendcounts[rank], MPI_DOUBLE, 0, MPI_COMM_WORLD,
+                              &y_req);
             }
-            // Find N_proc for this process
-            N_proc = std::min((rank + 1) * N_proc, N_batch) - rank*N_proc;
+            N_batch = N_batch_next;
+            N_proc = N_proc_next;
 
-            // Scatter this batch of X and y values to all processes
-            MPI_Scatterv(X_batch, X_sendcounts, X_displs, MPI_DOUBLE, X_proc, 
-                         X_sendcounts[rank], MPI_DOUBLE, 0, MPI_COMM_WORLD);
+            // Now prepare for the next scattering
+            if(batch + 1 < num_batches)
+            {
+                // Find the X and y values from the next batch 
+                last_col = std::min((batch + 2)*batch_size-1, N-1);
+                N_batch_next  = std::min((batch + 2)*batch_size, N) 
+                             - (batch+1)*batch_size;
 
-            MPI_Scatterv(y_batch, y_sendcounts, y_displs, MPI_DOUBLE, y_proc, 
-                         y_sendcounts[rank], MPI_DOUBLE, 0, MPI_COMM_WORLD);
+                X_batch = (double *)X.memptr() + (batch+1)*batch_size*K;
+                y_batch = (double *)y.memptr() + (batch+1)*batch_size*L;
 
+                // Find the max number of images per proc
+                N_proc_next = (N_batch_next + (num_procs - 1)) / 
+                          num_procs;
+
+                // Find the sendcounts and displacements for each process
+                for(int i = 0; i < num_procs; i++)
+                {
+                    X_sendcounts[i] = (std::min((i + 1) * N_proc_next, N_batch_next) 
+                                    - i*N_proc_next)*K;
+                    y_sendcounts[i] = (std::min((i + 1) * N_proc_next, N_batch_next) 
+                                    - i*N_proc_next)*L;
+                    X_displs[i] = i*N_proc_next*K;
+                    y_displs[i] = i*N_proc_next*L;
+                }
+                // Find N_proc for this process
+                N_proc_next = std::min((rank + 1) * N_proc_next, N_batch_next) 
+                            - rank*N_proc_next;
+            }
+
+            MPI_Wait(&X_req, MPI_STATUS_IGNORE);
             // Copy this batches X and y values to the device
             checkCudaErrors(cudaMemcpy(dX_proc, X_proc, K*N_proc*sizeof(double),
                                        cudaMemcpyHostToDevice));
 
+            // Feed forward and back propogate on the device
+            myFeedForward(dCache, dX_proc, N_proc); 
+
+
+
+            MPI_Wait(&y_req, MPI_STATUS_IGNORE);
             checkCudaErrors(cudaMemcpy(dy_proc, y_proc, L*N_proc*sizeof(double),
                                        cudaMemcpyHostToDevice));
 
-            // Feed forward and back propogate on the device
-            myFeedForward(dCache, dX_proc, N_proc); 
             myBackPropogation(dCache, dX_proc, dy_proc, N_proc, reg);
+
+
+            // Begin scattering for the next batch
+            if(batch + 1 < num_batches)
+            {
+
+                // Scatter this batch of X and y values to all processes
+                MPI_Iscatterv(X_batch, X_sendcounts, X_displs, MPI_DOUBLE, X_proc, 
+                             X_sendcounts[rank], MPI_DOUBLE, 0, MPI_COMM_WORLD,
+                             &X_req);
+                 
+                MPI_Iscatterv(y_batch, y_sendcounts, y_displs, MPI_DOUBLE, y_proc, 
+                              y_sendcounts[rank], MPI_DOUBLE, 0, MPI_COMM_WORLD,
+                              &y_req);
+            }
 
             // Copy the gradients back to the host
             checkCudaErrors(cudaMemcpy(dW1, dCache.dW1, M*K*sizeof(double), 

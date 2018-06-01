@@ -43,3 +43,4 @@ clear:
 
 run:
 	sbatch run.sh
+	while true; do sleep 1s; squeue; done
