@@ -5,6 +5,7 @@
 #include "gpu_func.h"
 #include "mpi.h"
 #include "iomanip"
+#include <cuda_runtime.h> // TODO
 
 #define MPI_SAFE_CALL( call ) do {                               \
     int err = call;                                              \
@@ -358,30 +359,33 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
        and therefore goes from 0 to epochs*num_batches */
     int iter = 0;
 
-    double *dW1 = (double *)malloc(M*K*sizeof(double));
-    double *db1 = (double *)malloc(M*sizeof(double));
-    double *dW2 = (double *)malloc(L*M*sizeof(double));
-    double *db2 = (double *)malloc(L*sizeof(double));
+    double *dW1;// = (double *)malloc(M*K*sizeof(double));
+    double *db1;// = (double *)malloc(M*sizeof(double));
+    double *dW2;// = (double *)malloc(L*M*sizeof(double));
+    double *db2;// = (double *)malloc(L*sizeof(double));
 
-    double *dW1_g = (double *)malloc(M*K*sizeof(double));
-    double *db1_g = (double *)malloc(M*sizeof(double));
-    double *dW2_g = (double *)malloc(L*M*sizeof(double));
-    double *db2_g = (double *)malloc(L*sizeof(double));
+    double *dW1_g;// = (double *)malloc(M*K*sizeof(double));
+    double *db1_g;// = (double *)malloc(M*sizeof(double));
+    double *dW2_g;// = (double *)malloc(L*M*sizeof(double));
+    double *db2_g;// = (double *)malloc(L*sizeof(double));
+
+    checkCudaErrors(cudaMallocHost((void **)&dW1, M*K*sizeof(double)));
+    checkCudaErrors(cudaMallocHost((void **)&db1, M*sizeof(double)));
+    checkCudaErrors(cudaMallocHost((void **)&dW2, L*M*sizeof(double)));
+    checkCudaErrors(cudaMallocHost((void **)&db2, L*sizeof(double)));
+
+    checkCudaErrors(cudaMallocHost((void **)&dW1_g, M*K*sizeof(double)));
+    checkCudaErrors(cudaMallocHost((void **)&db1_g, M*sizeof(double)));
+    checkCudaErrors(cudaMallocHost((void **)&dW2_g, L*M*sizeof(double)));
+    checkCudaErrors(cudaMallocHost((void **)&db2_g, L*sizeof(double)));
 
     // Find the maximum possible number of images per process per batch. 
     int N_proc = (batch_size + (num_procs) - 1)/num_procs;
 
-    double *X_proc = (double *)malloc(K*N_proc*sizeof(double));
-    double *y_proc = (double *)malloc(L*N_proc*sizeof(double));
-
-    // Check the mallocs
-    if(((dW1   == 0) || (db1   == 0) || (dW2   == 0) || (db2   == 0) ||
-        (dW1_g == 0) || (db1_g == 0) || (dW2_g == 0) || (db2_g == 0) ||
-        (X_proc == 0) || (y_proc == 0)))
-    {
-        std::cerr << "ERROR: Host allocation failure!" << std::endl;
-        exit(1);
-    }
+    double *X_proc;// = (double *)malloc(K*N_proc*sizeof(double));
+    double *y_proc;// = (double *)malloc(L*N_proc*sizeof(double));
+    checkCudaErrors(cudaMallocHost((void **)&X_proc, K*N_proc*sizeof(double)));
+    checkCudaErrors(cudaMallocHost((void **)&y_proc, L*N_proc*sizeof(double)));
 
     double *dX_proc;
     double *dy_proc;
@@ -495,17 +499,16 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
         }
     }
 
-    free(X_proc);
-    free(y_proc);
-    free(dW1);
-    free(db1);
-    free(dW2);
-    free(db2);
-    free(dW1_g);
-    free(db1_g);
-    free(dW2_g);
-    free(db2_g);
-
+    checkCudaErrors(cudaFreeHost(X_proc));
+    checkCudaErrors(cudaFreeHost(y_proc));
+    checkCudaErrors(cudaFreeHost(dW1));
+    checkCudaErrors(cudaFreeHost(db1));
+    checkCudaErrors(cudaFreeHost(dW2));
+    checkCudaErrors(cudaFreeHost(db2));
+    checkCudaErrors(cudaFreeHost(dW1_g));
+    checkCudaErrors(cudaFreeHost(db1_g));
+    checkCudaErrors(cudaFreeHost(dW2_g));
+    checkCudaErrors(cudaFreeHost(db2_g));
 
     error_file.close();
 }
