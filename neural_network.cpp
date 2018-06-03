@@ -359,25 +359,14 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
        and therefore goes from 0 to epochs*num_batches */
     int iter = 0;
 
-    double *dW1;// = (double *)malloc(M*K*sizeof(double));
-    double *db1;// = (double *)malloc(M*sizeof(double));
-    double *dW2;// = (double *)malloc(L*M*sizeof(double));
-    double *db2;// = (double *)malloc(L*sizeof(double));
+    double *gradients;
+    double *gradients_g;
 
-    double *dW1_g;// = (double *)malloc(M*K*sizeof(double));
-    double *db1_g;// = (double *)malloc(M*sizeof(double));
-    double *dW2_g;// = (double *)malloc(L*M*sizeof(double));
-    double *db2_g;// = (double *)malloc(L*sizeof(double));
+    checkCudaErrors(cudaMallocHost((void **)&gradients, 
+                    dCache.grad_len*sizeof(double)));
 
-    checkCudaErrors(cudaMallocHost((void **)&dW1, M*K*sizeof(double)));
-    checkCudaErrors(cudaMallocHost((void **)&db1, M*sizeof(double)));
-    checkCudaErrors(cudaMallocHost((void **)&dW2, L*M*sizeof(double)));
-    checkCudaErrors(cudaMallocHost((void **)&db2, L*sizeof(double)));
-
-    checkCudaErrors(cudaMallocHost((void **)&dW1_g, M*K*sizeof(double)));
-    checkCudaErrors(cudaMallocHost((void **)&db1_g, M*sizeof(double)));
-    checkCudaErrors(cudaMallocHost((void **)&dW2_g, L*M*sizeof(double)));
-    checkCudaErrors(cudaMallocHost((void **)&db2_g, L*sizeof(double)));
+    checkCudaErrors(cudaMallocHost((void **)&gradients_g, 
+                    dCache.grad_len*sizeof(double)));
 
     // Find the maximum possible number of images per process per batch. 
     int N_proc = (batch_size + (num_procs) - 1)/num_procs;
@@ -487,8 +476,6 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
             // Feed forward and back propogate on the device
             myFeedForward(dCache, dX_proc, N_proc); 
 
-
-
             MPI_Wait(&y_req, MPI_STATUS_IGNORE);
             checkCudaErrors(cudaMemcpy(dy_proc, y_proc, L*N_proc*sizeof(double),
                                        cudaMemcpyHostToDevice));
@@ -511,34 +498,16 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
             }
 
             // Copy the gradients back to the host
-            checkCudaErrors(cudaMemcpy(dW1, dCache.dW1, M*K*sizeof(double), 
-                            cudaMemcpyDeviceToHost));
-            checkCudaErrors(cudaMemcpy(db1, dCache.db1, M*sizeof(double),   
-                            cudaMemcpyDeviceToHost));
-            checkCudaErrors(cudaMemcpy(dW2, dCache.dW2, L*M*sizeof(double), 
-                            cudaMemcpyDeviceToHost));
-            checkCudaErrors(cudaMemcpy(db2, dCache.db2, L*sizeof(double),   
-                            cudaMemcpyDeviceToHost));
+            checkCudaErrors(cudaMemcpy(gradients, dCache.gradients, 
+                  dCache.grad_len*sizeof(double), cudaMemcpyDeviceToHost));
 
             // Allreduce the gradients
-            MPI_SAFE_CALL(MPI_Allreduce(dW1, dW1_g, M*K, MPI_DOUBLE, MPI_SUM, 
-                                        MPI_COMM_WORLD));
-            MPI_SAFE_CALL(MPI_Allreduce(db1, db1_g, M,   MPI_DOUBLE, MPI_SUM, 
-                                        MPI_COMM_WORLD));
-            MPI_SAFE_CALL(MPI_Allreduce(dW2, dW2_g, L*M, MPI_DOUBLE, MPI_SUM, 
-                                        MPI_COMM_WORLD));
-            MPI_SAFE_CALL(MPI_Allreduce(db2, db2_g, L,   MPI_DOUBLE, MPI_SUM, 
-                                        MPI_COMM_WORLD));
+            MPI_SAFE_CALL(MPI_Allreduce(gradients, gradients_g, dCache.grad_len, 
+                                        MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD));
 
             // Copy the reduced gradients back to the device
-            checkCudaErrors(cudaMemcpy(dCache.dW1, dW1_g, M*K*sizeof(double), 
-                                       cudaMemcpyHostToDevice));
-            checkCudaErrors(cudaMemcpy(dCache.db1, db1_g, M*sizeof(double),   
-                                       cudaMemcpyHostToDevice));
-            checkCudaErrors(cudaMemcpy(dCache.dW2, dW2_g, L*M*sizeof(double), 
-                                       cudaMemcpyHostToDevice));
-            checkCudaErrors(cudaMemcpy(dCache.db2, db2_g, L*sizeof(double),   
-                                       cudaMemcpyHostToDevice));
+            checkCudaErrors(cudaMemcpy(dCache.gradients, gradients_g,
+                  dCache.grad_len*sizeof(double), cudaMemcpyDeviceToHost));
 
             // Perform gradient descent on the device
             myGradientDescent(dCache, learning_rate, N_batch);
@@ -565,14 +534,8 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
 
     checkCudaErrors(cudaFreeHost(X_proc));
     checkCudaErrors(cudaFreeHost(y_proc));
-    checkCudaErrors(cudaFreeHost(dW1));
-    checkCudaErrors(cudaFreeHost(db1));
-    checkCudaErrors(cudaFreeHost(dW2));
-    checkCudaErrors(cudaFreeHost(db2));
-    checkCudaErrors(cudaFreeHost(dW1_g));
-    checkCudaErrors(cudaFreeHost(db1_g));
-    checkCudaErrors(cudaFreeHost(dW2_g));
-    checkCudaErrors(cudaFreeHost(db2_g));
+    checkCudaErrors(cudaFreeHost(gradients));
+    checkCudaErrors(cudaFreeHost(gradients_g));
 
     error_file.close();
 }

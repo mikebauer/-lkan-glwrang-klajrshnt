@@ -458,56 +458,6 @@ void myRowSum_kernel(double *A, int M, int N, int stride, int num_iter)
     }
 }
 
-/**
- * \brief Sums by row to get a column vector in the first column of the array A.
- *
- * Uses myRowSum_kernel repeatedly to compute the row sum.
- *
- * arguments:
- *     A - matrix to sum the rows of
- *     M - number of rows in A
- *     N - number of columns in A
- */
-void myRowSum(double *A, int M, int N)
-{
-    dim3 blockSize (BLOCK_SIZE, BLOCK_SIZE);
-
-    // Define num_iters to ensure that our gridsize is not larger than the max
-    // possible.
-    int num_iters = std::max(4, (N + MAX_GRID_SIZE - 1) / MAX_GRID_SIZE);
-    int stride = 1;
-    
-    dim3 gridSize (std::min((int)((M + blockSize.x - 1)/blockSize.x),
-                   MAX_GRID_SIZE),
-                   (N + (blockSize.y*stride*num_iters) - 1) /
-                        (blockSize.y*stride*num_iters));
-
-
-    // Call myRowSum_kernel repeatedly until all values have been summed into
-    // the first row. We need to adjust the gridSize as we go because the number
-    // of columns we need to sum is reduced on each iteration.
-    myRowSum_kernel<<<gridSize, blockSize>>>(A, M, N, stride, num_iters);
-    check_launch("myRowSum_kernel");
-
-    while (stride*num_iters < N)
-    {
-      stride *= num_iters;
-      gridSize.y = (N + (blockSize.y*stride*num_iters) - 1) /
-                        (blockSize.y*stride*num_iters);
-      
-      myRowSum_kernel<<<gridSize, blockSize>>>(A, M, N, stride, num_iters);
-      check_launch("myRowSum_kernel");
-    }
-
-    blockSize.x = 256;
-    blockSize.y = 1;
-    gridSize.x = std::min((int)((M + blockSize.x - 1)/blockSize.x),
-                          MAX_GRID_SIZE);
-    gridSize.y = 1;
-
-    vector_scale_kernel<<<gridSize, blockSize>>>(A, M, N);
-    check_launch("vector_scale_kernel");
-}
 
 /**
  * \brief Kernel which performs the special Hadamard product present in the back
@@ -607,6 +557,70 @@ void onDeviceCopy(double *A, double *B, int M, int N)
     check_launch("onDeviceCopy kernel");
 }
 
+
+
+/**
+ * \brief Sums by row to get a column vector in the first column of the array A.
+ *
+ * Uses myRowSum_kernel repeatedly to compute the row sum.
+ *
+ * arguments:
+ *     A - matrix to sum the rows of
+ *     M - number of rows in A
+ *     N - number of columns in A
+ */
+void myRowSum(double *A, double *out, int M, int N)
+{
+    dim3 blockSize (BLOCK_SIZE, BLOCK_SIZE);
+
+    // Define num_iters to ensure that our gridsize is not larger than the max
+    // possible.
+    int num_iters = std::max(4, (N + MAX_GRID_SIZE - 1) / MAX_GRID_SIZE);
+    int stride = 1;
+    
+    dim3 gridSize (std::min((int)((M + blockSize.x - 1)/blockSize.x),
+                   MAX_GRID_SIZE),
+                   (N + (blockSize.y*stride*num_iters) - 1) /
+                        (blockSize.y*stride*num_iters));
+
+
+    // Call myRowSum_kernel repeatedly until all values have been summed into
+    // the first row. We need to adjust the gridSize as we go because the number
+    // of columns we need to sum is reduced on each iteration.
+    myRowSum_kernel<<<gridSize, blockSize>>>(A, M, N, stride, num_iters);
+    check_launch("myRowSum_kernel");
+
+    while (stride*num_iters < N)
+    {
+      stride *= num_iters;
+      gridSize.y = (N + (blockSize.y*stride*num_iters) - 1) /
+                        (blockSize.y*stride*num_iters);
+      
+      myRowSum_kernel<<<gridSize, blockSize>>>(A, M, N, stride, num_iters);
+      check_launch("myRowSum_kernel");
+    }
+
+    blockSize.x = 256;
+    blockSize.y = 1;
+    gridSize.x = std::min((int)((M + blockSize.x - 1)/blockSize.x),
+                          MAX_GRID_SIZE);
+    gridSize.y = 1;
+
+    vector_scale_kernel<<<gridSize, blockSize>>>(A, M, N);
+    check_launch("vector_scale_kernel");
+
+    onDeviceCopy_kernel<<<gridSize, blockSize>>>(out, A, M, 1);
+    check_launch("onDeviceCopy_kernel");
+}
+
+
+
+
+
+
+
+
+
 /**
  * \brief Function for carrying out the back propogation
  *
@@ -630,8 +644,6 @@ int myBackPropogation(deviceCache &d, double *X, double *y, int N, double reg)
     int L = d.L;
     int M = d.M;
     int K = d.K;
-
-    double *db1, *db2;
 
     double *diff = d.A2;
     double *dZ1 = d.dA1;
@@ -668,10 +680,7 @@ int myBackPropogation(deviceCache &d, double *X, double *y, int N, double reg)
     check_launch("myGEMM_kernel");
 
     // Step 4: Compute db2
-    myRowSum(diff, L, N);
-    db2 = diff; // Since everything is summed into the first row of diff, we can
-                // We can just do this.                                    
-    d.db2 = db2;
+    myRowSum(diff, d.db2, L, N);
 
     // Step 5: Compute dZ1
     // Gridsize is still fine
@@ -691,9 +700,7 @@ int myBackPropogation(deviceCache &d, double *X, double *y, int N, double reg)
     //check_launch("matrix_scale_kernel");
 
     // Step 7: Compute db1
-    myRowSum(dZ1, M, N);
-    db1 = dZ1;                                                            
-    d.db1 = db1;
+    myRowSum(dZ1, d.db1, M, N);
     
     return 0;
 }

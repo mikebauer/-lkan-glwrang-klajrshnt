@@ -50,10 +50,12 @@ class deviceCache {
     double *A1, *W1, *b1;
     double *A2, *W2, *b2;
     double *dA1, *dW1, *dW2;
+    double *gradients;
 
-    double *db1, *db2; // Aren't actually alloced memory, but hold pointers
+    double *db1, *db2;
 
     int K, L, M, N;
+    int grad_len;
 
     deviceCache(int _K, int _L, int _M, int _N, int batch_size)
         : K(_K), L(_L), M(_M), N(_N)
@@ -64,14 +66,27 @@ class deviceCache {
         checkCudaErrors(
             cudaMalloc((void **)&dA1, M * batch_size * sizeof(double)));
         checkCudaErrors(cudaMalloc((void **)&W1, M * K * sizeof(double)));
-        checkCudaErrors(cudaMalloc((void **)&dW1, M * K * sizeof(double)));
         checkCudaErrors(cudaMalloc((void **)&b1, M * sizeof(double)));
 
         checkCudaErrors(
             cudaMalloc((void **)&A2, L * batch_size * sizeof(double)));
         checkCudaErrors(cudaMalloc((void **)&W2, L * M * sizeof(double)));
-        checkCudaErrors(cudaMalloc((void **)&dW2, L * M * sizeof(double)));
         checkCudaErrors(cudaMalloc((void **)&b2, L * sizeof(double)));
+
+
+        // Put all of the gradients in a single place. We don't want misaligned
+        // memory reads/writes in our kernels, so we need to align everything to
+        // the nearest 16 doubles. Store in order dW1, db1, dW2, db2
+        grad_len = 16*((M*K + 15)/16) + 16*((M + 15)/16)
+                 + 16*((L*M + 15)/16) + 16*((L + 15)/16);
+
+        checkCudaErrors(cudaMalloc((void **)&gradients, 
+                                   grad_len*sizeof(double)));
+
+        dW1 = gradients;
+        db1 = dW1 + 16*((M*K + 15)/16);
+        dW2 = db1 + 16*((M + 15)/16);
+        db2 = dW2 + 16*((L*M + 15)/16);
 
     }
 
@@ -84,8 +99,7 @@ class deviceCache {
         cudaFree(W2); 
         cudaFree(b2); 
         cudaFree(dA1); 
-        cudaFree(dW1); 
-        cudaFree(dW2); 
+        cudaFree(gradients);
     }
 };
 
