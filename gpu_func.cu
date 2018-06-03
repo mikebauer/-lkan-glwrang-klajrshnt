@@ -155,7 +155,7 @@ int myGEMM(double* A, double* B, double* C, double* alpha, double* beta, int M,
     myGEMM_kernel<Identity, true, false, false><<<gridSize, blockSize>>>(
         A, B, C, *alpha, *beta, M, N, K);
 
-    check_launch("myGEMM_kernel");
+    //check_launch("myGEMM_kernel");
 
     return 0;
 }
@@ -288,7 +288,7 @@ int myFeedForward(deviceCache &d, double* X, int N)
     GEMM_vector_kernel<Sigmoid><<<gridSize, blockSize>>>(
         W1, X, A1, b1, M, N, K);
 
-    check_launch("GEMM_vector_kernel layer1");
+    //check_launch("GEMM_vector_kernel layer1");
 
     // Step 2a: Second layer. We want to compute A2. We start by storing Z2 in
     // the space of A2
@@ -296,7 +296,7 @@ int myFeedForward(deviceCache &d, double* X, int N)
     gridSize.y  = std::min((int)((N + blockSize.y - 1)/blockSize.y), MAX_GRID_SIZE);
     GEMM_vector_kernel<Identity><<<gridSize, blockSize>>>(
         W2, A1, A2, b2, L, N, M);
-    check_launch("GEMM_vector_kernel layer2");
+    //check_launch("GEMM_vector_kernel layer2");
 
     // Step 2b: Now we want to apply the softmax kernel to Z2 (which is stored
     // in A2) to get the correct A2 = yhat.
@@ -306,7 +306,7 @@ int myFeedForward(deviceCache &d, double* X, int N)
                            MAX_GRID_SIZE);
     gridSize.y  = 1;
     softmax_kernel<<<gridSize, blockSize>>>(A2, L, N);
-    check_launch("softmax_kernel");
+    //check_launch("softmax_kernel");
 
     return 0;
 }
@@ -554,7 +554,7 @@ void onDeviceCopy(double *A, double *B, int M, int N)
                    std::min((int)((N + blockSize.y - 1)/blockSize.y), MAX_GRID_SIZE));
 
     onDeviceCopy_kernel<<<gridSize,blockSize>>>(A, B, M, N);
-    check_launch("onDeviceCopy kernel");
+    //check_launch("onDeviceCopy kernel");
 }
 
 
@@ -588,7 +588,7 @@ void myRowSum(double *A, double *out, int M, int N)
     // the first row. We need to adjust the gridSize as we go because the number
     // of columns we need to sum is reduced on each iteration.
     myRowSum_kernel<<<gridSize, blockSize>>>(A, M, N, stride, num_iters);
-    check_launch("myRowSum_kernel");
+    //check_launch("myRowSum_kernel");
 
     while (stride*num_iters < N)
     {
@@ -597,7 +597,7 @@ void myRowSum(double *A, double *out, int M, int N)
                         (blockSize.y*stride*num_iters);
       
       myRowSum_kernel<<<gridSize, blockSize>>>(A, M, N, stride, num_iters);
-      check_launch("myRowSum_kernel");
+      //check_launch("myRowSum_kernel");
     }
 
     blockSize.x = 256;
@@ -607,10 +607,10 @@ void myRowSum(double *A, double *out, int M, int N)
     gridSize.y = 1;
 
     vector_scale_kernel<<<gridSize, blockSize>>>(A, M, N);
-    check_launch("vector_scale_kernel");
+    //check_launch("vector_scale_kernel");
 
     onDeviceCopy_kernel<<<gridSize, blockSize>>>(out, A, M, 1);
-    check_launch("onDeviceCopy_kernel");
+    //check_launch("onDeviceCopy_kernel");
 }
 
 
@@ -654,7 +654,7 @@ int myBackPropogation(deviceCache &d, double *X, double *y, int N, double reg)
                    MAX_GRID_SIZE), 1);
 
     backPropDiff_kernel<<<gridSize,blockSize>>>(diff, y, L, N);            
-    check_launch("backPropDiff kernel");
+    //check_launch("backPropDiff kernel");
 
     // Step 2: Compute dW2
     onDeviceCopy(dW2, W2, L, M);
@@ -666,7 +666,7 @@ int myBackPropogation(deviceCache &d, double *X, double *y, int N, double reg)
     // Include offset, transpose A1
     myGEMM_kernel<Identity, true, false, true><<<gridSize, blockSize>>>(
         diff, A1, dW2, 1, reg, L, M, N);                                   
-    check_launch("myGEMM_kernel");
+    //check_launch("myGEMM_kernel");
 
     matrix_scale_kernel<<<gridSize, blockSize>>>(dW2, L, M, N);
     //check_launch("matrix_scale_kernel");
@@ -677,7 +677,7 @@ int myBackPropogation(deviceCache &d, double *X, double *y, int N, double reg)
     // Do not include offset, transpose W2
     myGEMM_kernel<Identity, false, true, false><<<gridSize, blockSize>>>(
         W2, diff, dA1, 1, 1, M, N, L);                                     
-    check_launch("myGEMM_kernel");
+    //check_launch("myGEMM_kernel");
 
     // Step 4: Compute db2
     myRowSum(diff, d.db2, L, N);
@@ -685,7 +685,7 @@ int myBackPropogation(deviceCache &d, double *X, double *y, int N, double reg)
     // Step 5: Compute dZ1
     // Gridsize is still fine
     mySpecialHadamard_kernel<<<gridSize, blockSize>>>(dZ1, A1, M, N);      
-    check_launch("mySpecialHadamard_kernel");
+    //check_launch("mySpecialHadamard_kernel");
 
     // Step 6: Compute dW1
     onDeviceCopy(dW1, W1, M, K);
@@ -694,7 +694,7 @@ int myBackPropogation(deviceCache &d, double *X, double *y, int N, double reg)
     // Include offset, transpose X
     myGEMM_kernel<Identity, true, false, true><<<gridSize, blockSize>>>(
         dZ1, X, dW1, 1, reg, M, K, N);                                    
-    check_launch("myGEMM_kernel");
+    //check_launch("myGEMM_kernel");
 
     matrix_scale_kernel<<<gridSize, blockSize>>>(dW1, M, K, N);
     //check_launch("matrix_scale_kernel");
@@ -769,14 +769,14 @@ void myGradientDescent(deviceCache &d, double learning_rate, int N)
                     std::min((int)((d.K + blockSize.y - 1)/blockSize.y), MAX_GRID_SIZE)); 
     grad_descent_kernel<<<gridSize, blockSize>>>(d.W1, d.dW1, learning_rate,
                                                  d.M, d.K, N);
-    check_launch("grad_descent_kernel");
+    //check_launch("grad_descent_kernel");
 
     // Step 2: Update W2
     gridSize.x = std::min((int)((d.L + blockSize.x - 1)/blockSize.x), MAX_GRID_SIZE);
     gridSize.y = std::min((int)((d.M + blockSize.y - 1)/blockSize.y), MAX_GRID_SIZE);
     grad_descent_kernel<<<gridSize, blockSize>>>(d.W2, d.dW2, learning_rate,
                                                  d.L, d.M, N);
-    check_launch("grad_descent_kernel");
+    //check_launch("grad_descent_kernel");
 
     // Step 3: Update b1
     blockSize.x = 256;
@@ -785,7 +785,7 @@ void myGradientDescent(deviceCache &d, double learning_rate, int N)
     gridSize.y = 1;
     grad_descent_kernel<<<gridSize, blockSize>>>(d.b1, d.db1, learning_rate,
                                                  d.M, 1, N);
-    check_launch("grad_descent_kernel");
+    //check_launch("grad_descent_kernel");
 
 
     // Step 4: Update b2
@@ -793,5 +793,5 @@ void myGradientDescent(deviceCache &d, double learning_rate, int N)
     grad_descent_kernel<<<gridSize, blockSize>>>(d.b2, d.db2, learning_rate,
                                                  d.L, 1, N);
 
-    check_launch("grad_descent_kernel");
+    //check_launch("grad_descent_kernel");
 }

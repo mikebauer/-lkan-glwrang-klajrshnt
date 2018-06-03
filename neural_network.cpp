@@ -350,6 +350,19 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
     deviceCache dCache (K, L, M, N, batch_size);
     update_deviceCache_from_nn(nn, dCache);
 
+    int num_streams = 5;
+    int stream_bounds[num_streams + 1];
+    int stream_lens[num_streams];
+    cudaStream_t stream[num_streams];
+    
+    for(int i = 0; i < num_streams+1; i++)
+    {
+        checkCudaErrors(cudaStreamCreate(&stream[i]));
+        stream_bounds[i] = (i*dCache.grad_len)/num_streams;
+    }
+    for(int i = 0; i < num_streams; i++)
+        stream_lens[i] = stream_bounds[i+1] - stream_bounds[i];
+
     /* HINT: You can obtain a raw pointer to the memory used by Armadillo Matrices
        for storing elements in a column major way. Or you can allocate your own array
        memory space and store the elements in a row major way. Remember to update the
@@ -387,7 +400,7 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
     int y_sendcounts[num_procs];
     int y_displs[num_procs];
 
-    MPI_Request X_req, y_req;
+    MPI_Request X_req, y_req, s_req[num_streams];
 
     int last_col, N_batch, N_batch_next, N_proc_next;
     double *X_batch, *y_batch;
@@ -498,16 +511,40 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
             }
 
             // Copy the gradients back to the host
-            checkCudaErrors(cudaMemcpy(gradients, dCache.gradients, 
-                  dCache.grad_len*sizeof(double), cudaMemcpyDeviceToHost));
+            checkCudaErrors(cudaMemcpyAsync(gradients, dCache.gradients, 
+                  stream_lens[0]*sizeof(double), cudaMemcpyDeviceToHost, stream[0]));
 
             // Allreduce the gradients
-            MPI_SAFE_CALL(MPI_Allreduce(gradients, gradients_g, dCache.grad_len, 
-                                        MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD));
+            for(int i = 0; i < num_streams; i++)
+            {
+                // Wait for the previous stream to finish copying from host
+                cudaStreamSynchronize(stream[i]);
+                MPI_SAFE_CALL(MPI_Iallreduce(gradients + stream_bounds[i], 
+                                            gradients_g + stream_bounds[i], 
+                                            stream_lens[i], 
+                                            MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD,
+                                            &s_req[i]));
+                if(i + 1 != num_streams)
+                {
+                    // Start the next stream copying from host
+                    checkCudaErrors(cudaMemcpyAsync(
+                                    gradients + stream_bounds[i+1], 
+                                    dCache.gradients + stream_bounds[i+1], 
+                                    stream_lens[i+1]*sizeof(double), 
+                                    cudaMemcpyDeviceToHost, stream[i+1]));
+                }
 
-            // Copy the reduced gradients back to the device
-            checkCudaErrors(cudaMemcpy(dCache.gradients, gradients_g,
-                  dCache.grad_len*sizeof(double), cudaMemcpyDeviceToHost));
+                // Copy the results of the scatter back to device
+                MPI_Wait(&s_req[i], MPI_STATUS_IGNORE);
+                checkCudaErrors(cudaMemcpyAsync(
+                        dCache.gradients + stream_bounds[i], 
+                        gradients_g + stream_bounds[i],
+                        stream_lens[i]*sizeof(double), 
+                        cudaMemcpyHostToDevice,
+                        stream[i]));
+            }
+
+            cudaDeviceSynchronize();
 
             // Perform gradient descent on the device
             myGradientDescent(dCache, learning_rate, N_batch);
@@ -536,6 +573,9 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
     checkCudaErrors(cudaFreeHost(y_proc));
     checkCudaErrors(cudaFreeHost(gradients));
     checkCudaErrors(cudaFreeHost(gradients_g));
+
+    for(int i = 0; i < num_streams; i++)
+        checkCudaErrors(cudaStreamDestroy(stream[i]));
 
     error_file.close();
 }

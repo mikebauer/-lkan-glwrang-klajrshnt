@@ -13,6 +13,8 @@ int main(int argc, char *argv[])
                device, deviceProp.major, deviceProp.minor);
         printf("Value of asyncEngineCount: %d\n",
                deviceProp.asyncEngineCount); 
+        printf("Value of canMapHostMemory: %d\n",
+               deviceProp.canMapHostMemory); 
     }
     return(0);
 }

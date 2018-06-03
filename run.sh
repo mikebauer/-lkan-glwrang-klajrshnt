@@ -10,6 +10,7 @@
 #SBATCH --job-name=cme213
 #SBATCH --output=cme213-%j.out
 #SBATCH --error=cme213-%j.err
+#SBATCH --nodelist=gpu-200-2
 
 #echo "In file run.sh, update the line below before running the script"
 #echo "WORKDIR='<directory with your code>'"
