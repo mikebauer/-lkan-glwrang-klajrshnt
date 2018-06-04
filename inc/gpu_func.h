@@ -45,6 +45,9 @@ int myGEMM(double* A, double* B, double* C, double* alpha, double* beta, int M,
            int N, int K);
 
 
+/**
+ * \brief Class for holding key data structures in device memory.
+ */
 class deviceCache {
   public:
     double *A1, *W1, *b1;
@@ -53,6 +56,16 @@ class deviceCache {
 
     double *db1, *db2; // Aren't actually alloced memory, but hold pointers
 
+    // Description of Dimension Variables:
+    // X  is KxN
+    // W1 is MxK
+    // b1 is Mx1
+    // A1 is MxN
+    //
+    // W2 is LxM
+    // b2 is Lx1
+    // A2 is LxN
+    // y  is LxN
     int K, L, M, N;
 
     deviceCache(int _K, int _L, int _M, int _N, int batch_size)
@@ -92,12 +105,6 @@ class deviceCache {
 int myFeedForward(deviceCache &d, double* X, int N);
 int myBackPropogation(deviceCache &d, double *X, double *y, int N, double reg);
 void myGradientDescent(deviceCache &d, double learning_rate, int N);
-void myRowSum(double *A, int M, int N);
-
-
-
-
-
 
 
 #endif

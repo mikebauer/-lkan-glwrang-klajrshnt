@@ -341,6 +341,17 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
     error_file.open("Outputs/CpuGpuDiff.txt");
     int print_flag = 0;
 
+    // Description of Dimension Variables:
+    // X  is KxN
+    // W1 is MxK
+    // b1 is Mx1
+    // A1 is MxN
+    //
+    // W2 is LxM
+    // b2 is Lx1
+    // A2 is LxN
+    // y  is LxN
+
     int K = nn.H[0];
     int M = nn.H[1];
     // N already defined
@@ -425,11 +436,13 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
             N_proc = std::min((rank + 1) * N_proc, N_batch) - rank*N_proc;
 
             // Scatter this batch of X and y values to all processes
-            MPI_Scatterv(X_batch, X_sendcounts, X_displs, MPI_DOUBLE, X_proc, 
-                         X_sendcounts[rank], MPI_DOUBLE, 0, MPI_COMM_WORLD);
+            MPI_SAFE_CALL(MPI_Scatterv(X_batch, X_sendcounts, X_displs, 
+                          MPI_DOUBLE, X_proc, X_sendcounts[rank], 
+                          MPI_DOUBLE, 0, MPI_COMM_WORLD));
 
-            MPI_Scatterv(y_batch, y_sendcounts, y_displs, MPI_DOUBLE, y_proc, 
-                         y_sendcounts[rank], MPI_DOUBLE, 0, MPI_COMM_WORLD);
+            MPI_SAFE_CALL(MPI_Scatterv(y_batch, y_sendcounts, y_displs, 
+                          MPI_DOUBLE, y_proc, y_sendcounts[rank], 
+                          MPI_DOUBLE, 0, MPI_COMM_WORLD));
 
             // Copy this batches X and y values to the device
             checkCudaErrors(cudaMemcpy(dX_proc, X_proc, K*N_proc*sizeof(double),
