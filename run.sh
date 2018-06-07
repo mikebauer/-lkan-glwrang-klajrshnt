@@ -10,7 +10,6 @@
 #SBATCH --job-name=cme213
 #SBATCH --output=cme213-%j.out
 #SBATCH --error=cme213-%j.err
-#SBATCH --nodelist=gpu-200-2
 
 #echo "In file run.sh, update the line below before running the script"
 #echo "WORKDIR='<directory with your code>'"
@@ -41,7 +40,7 @@ echo ----------------
 #mpirun -np 4 ./main -n 20 -e 3 -sd
 #mpirun -np 4 ./main -n 23 -r 0.0077 -l 0.0007 -e 1 -b 799 -sd
 #MV2_USE_CUDA=1 mpirun -np 4 nvprof --output-profile profile.%p.nvprof ./main -e 1
-#MV2_USE_CUDA=1 mpirun -np 1 nvprof --kernels "myGEMM_kernel" --analysis-metrics --output-profile GEMMmetrics.out.%p.nvprof ./main -g 4
+MV2_USE_CUDA=1 mpirun -np 1 nvprof --kernels "myGEMM_tile_kernel" --analysis-metrics --output-profile GEMMmetrics.out.%p.nvprof ./main -g 4
 #./a.out
 #cuda-memcheck --leak-check full ./main -e 1
-mpirun -np 4 ./main
+#mpirun -np 1 ./main -g 4

@@ -11,3 +11,4 @@ profiling
 profiling/*
 grading_cases
 grading_cases/*
+*.pdf

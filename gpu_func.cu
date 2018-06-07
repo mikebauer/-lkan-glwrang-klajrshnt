@@ -5,7 +5,11 @@
 #include <iostream>
 #include "cublas_v2.h"
 
+#include <stdio.h>
+
 #define BLOCK_SIZE (16)
+#define RESULT_BLOCK_Y    (16)
+#define SUBMATRIX_K   (4)
 #define MAX_GRID_SIZE (65535) 
 /******************************************************************************\
  * Section 1: Helper Structs                                                  *
@@ -65,6 +69,201 @@ int useless_gpu_add_one(int t) {
                                cudaMemcpyDeviceToHost));
     return result;
 }
+
+__global__ void myGEMM_fast_kernel(double *A, double *B, double *C,
+                                   double alpha, double beta,
+                                   int M, int N, int K)
+{
+    // Step 1: Find the block root
+    int i  =  blockDim.x*threadIdx.y + threadIdx.x;
+    int i0 = (blockDim.x*blockDim.y)*blockIdx.x + i;
+    int j0 = (RESULT_BLOCK_Y)*blockIdx.y;
+
+
+    // Step 2: Initialize shared and register memory:
+    __shared__ double B_block[SUBMATRIX_K*RESULT_BLOCK_Y];
+    double A_block[SUBMATRIX_K];
+    double C_out[RESULT_BLOCK_Y];
+
+    // Step 3: Initialize C_out:
+    for(int j = 0; j < RESULT_BLOCK_Y; j++)
+        C_out[j] = 0;
+
+    int num_iters = ((N - j0 < RESULT_BLOCK_Y) ? (N - j0) : RESULT_BLOCK_Y);
+    int B_col = (i/SUBMATRIX_K) + j0;
+
+    // Step 4: Iterate through all but the last blocks of A and B
+    for(int k0 = 0; k0 < K; k0 += SUBMATRIX_K)
+    {
+        // Step 4a: Load the A block into shared memory
+        if(i0 < M)
+        {
+            for(int k = 0; k < SUBMATRIX_K; k++)
+            {
+                if((k0 + k) < K)
+                    A_block[k] = A[M*(k0 + k) + i0];
+            }
+        }
+
+        __syncthreads();
+
+        // Step 4b: Load the B block into shared memory
+        if((B_col < N) && (k0 + (i % SUBMATRIX_K) < K)) // TODO
+        {
+            B_block[i] = B[K*B_col + k0 + (i % SUBMATRIX_K)];
+        }
+
+        __syncthreads();
+
+        // Step 4c: Compute the results:
+        for(int j = 0; j < num_iters; j++)
+        {
+            for(int k = 0; k < SUBMATRIX_K; k++)
+            {
+                if((k0 + k) < K) // TODO
+                    C_out[j] += A_block[k] * B_block[SUBMATRIX_K*j + k];
+            }
+        }
+    }
+    // Step 5: Accumulate results in C
+    for(int j = 0; j < num_iters; j++)
+    {
+        if(i0 < M)
+        {
+            C[(j0 + j)*M + i0] = alpha*C_out[j] + beta*C[(j0 + j)*M + i0]; 
+        }
+    }
+
+}
+
+__global__ void myGEMM_med_kernel(double *A, double *B, double *C,
+                                   double alpha, double beta,
+                                   int M, int N, int K)
+{
+    int row = blockIdx.x*blockDim.x + threadIdx.x;
+    int col = blockIdx.y*blockDim.y + threadIdx.y;
+
+    double old_val, product;
+
+    __shared__ double A_submat[BLOCK_SIZE*BLOCK_SIZE];
+    __shared__ double B_submat[BLOCK_SIZE*BLOCK_SIZE];
+
+
+    product  = 0;
+    old_val = C[row + M*col];
+    
+    for(int k0 = 0; k0 < K; k0 += blockDim.x)
+    {
+        __syncthreads();
+        // Step 1: Update A_submat:
+        if(k0 + threadIdx.y < K)
+            A_submat[threadIdx.x + blockDim.x*threadIdx.y] 
+                = (row < M) ? A[row + M*(k0 + threadIdx.y)] : 0;
+    
+        // Step 2: Update B_submat:
+        if(k0 + threadIdx.x < K)
+            B_submat[threadIdx.x + blockDim.x*threadIdx.y]
+                = (col < N) ? B[(k0 + threadIdx.x) + K*col] : 0;
+        __syncthreads();
+        
+        // Step 3: Accumulate the results:
+        int num_iters = min(K - k0, blockDim.x);
+        for(int k = 0; k < num_iters; k++) 
+        {
+            product += A_submat[threadIdx.x + k*blockDim.x] *
+                       B_submat[k + threadIdx.y*blockDim.x];
+        }
+    }
+    if((row < M) && (col < N))
+        C[row + M*col] = alpha*product + beta*old_val;
+}
+
+
+__global__ void myGEMM_tile_kernel(double *A, double *B, double *C,
+                                   double alpha, double beta,
+                                   int M, int N, int K)
+{
+    int block_root_i0 = 128*blockIdx.x;
+    int block_root_j0 = 128*blockIdx.y;
+
+    __shared__ double A_submat[128][4];
+    __shared__ double B_submat[4][128];
+
+    double product[8][8];
+    for(int i = 0; i < 8; i++)
+        for(int j = 0; j < 8; j++)
+            product[i][j] = 0;
+
+    int tile_root_i = threadIdx.x/32 * 64 + 4*(threadIdx.x % 8);
+    int tile_root_j = threadIdx.y*32 + ((threadIdx.x % 32)/8) * 4;
+
+    for(int k0 = 0; k0 < K; k0 += 4)
+    {
+
+        // Update the shared memory
+        __syncthreads();
+        A_submat[threadIdx.x][threadIdx.y] = 
+          ((block_root_i0 + threadIdx.x < M) ? ((k0 + threadIdx.y < K) ?
+           A[(block_root_i0 + threadIdx.x) + M*(k0 + threadIdx.y)] : 0) : 0);
+
+        A_submat[blockDim.x + threadIdx.x][threadIdx.y] = 
+          ((block_root_i0 + blockDim.x + threadIdx.x < M) ? 
+           ((k0 + threadIdx.y < K) ?
+            A[(block_root_i0 + blockDim.x + threadIdx.x) 
+              + M*(k0 + threadIdx.y)] : 0) : 0);
+
+
+        B_submat[threadIdx.y][threadIdx.x] =
+          ((block_root_j0 + threadIdx.x < N) ? ((k0 + threadIdx.y < K) ?
+           B[(k0 + threadIdx.y) + K*(block_root_j0 + threadIdx.x)] : 0) : 0);
+
+        B_submat[threadIdx.y][blockDim.x + threadIdx.x] =
+          ((block_root_j0 + threadIdx.x + blockDim.x < N) ? 
+           ((k0 + threadIdx.y < K) ?
+            B[(k0 + threadIdx.y) 
+              + K*(block_root_j0 + blockDim.x + threadIdx.x)] : 0) : 0);
+
+        __syncthreads();
+
+
+        // Loop through the tiles accumulating the product at each
+#pragma unroll 5
+        for(int i = 0; i < 2; i++)
+          for(int j = 0; j < 2; j++)
+            for(int l = 0; l < 4; l++)
+              for(int m = 0; m < 4; m++)
+                for(int k = 0; k < 4; k++)
+                {
+                  product[4*i + l][4*j + m] += 
+                    A_submat[tile_root_i + 32*i + l][k] *
+                    B_submat[k][tile_root_j + 16*j + m];
+                }
+    }
+    // Now update C
+#pragma unroll 4
+    for(int i = 0; i < 2; i++)
+      for(int j = 0; j < 2; j++)
+        for(int l = 0; l < 4; l++)
+          for(int m = 0; m < 4; m++)
+          {
+              if((block_root_i0 + tile_root_i + 32*i + l < M) &&
+                 (block_root_j0 + tile_root_j + 16*j + m < N))
+              {
+                  C[(block_root_i0 + tile_root_i + 32*i + l) 
+                    + M*(block_root_j0 + tile_root_j + 16*j + m)] =
+                    alpha*product[4*i + l][4*j + m] + beta *
+                    C[(block_root_i0 + tile_root_i + 32*i + l) 
+                      + M*(block_root_j0 + tile_root_j + 16*j + m)];
+              }
+
+          }
+
+}
+
+
+
+
+
 
 /**
  * \brief Kernel for in-place GEMM opration.
@@ -152,10 +351,27 @@ int myGEMM(double* A, double* B, double* C, double* alpha, double* beta, int M,
     dim3 gridSize (std::min((int)((M + blockSize.x - 1)/blockSize.x), MAX_GRID_SIZE),
                    std::min((int)((N + blockSize.y - 1)/blockSize.y), MAX_GRID_SIZE));
 
-    myGEMM_kernel<Identity, true, false, false><<<gridSize, blockSize>>>(
-        A, B, C, *alpha, *beta, M, N, K);
 
-    //check_launch("myGEMM_kernel");
+    //myGEMM_med_kernel<<<gridSize, blockSize>>>(A, B, C, *alpha, *beta, M, N, K);
+
+    //myGEMM_kernel<Identity, true, false, false><<<gridSize, blockSize>>>(
+    //    A, B, C, *alpha, *beta, M, N, K);
+
+    //dim3 blockSize (16, 4);
+    //dim3 gridSize  ((M + (blockSize.x*blockSize.y) - 1)/(blockSize.x*blockSize.y),
+    //                (N + RESULT_BLOCK_Y - 1)/RESULT_BLOCK_Y);
+
+    //myGEMM_fast_kernel<<<gridSize, blockSize>>>(
+    //    A, B, C, *alpha, *beta, M, N, K);
+
+    blockSize.x = 64;
+    blockSize.y = 4;
+    gridSize.x = (M + 127)/128;
+    gridSize.y = (N + 127)/128;
+
+    myGEMM_tile_kernel<<<gridSize, blockSize>>>(A, B, C, *alpha, *beta, M, N, K);
+
+    check_launch("myGEMM_kernel");
 
     return 0;
 }
