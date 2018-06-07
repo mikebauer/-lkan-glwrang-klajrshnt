@@ -108,7 +108,7 @@ __global__ void myGEMM_fast_kernel(double *A, double *B, double *C,
         __syncthreads();
 
         // Step 4b: Load the B block into shared memory
-        if((B_col < N) && (k0 + (i % SUBMATRIX_K) < K)) // TODO
+        if((B_col < N) && (k0 + (i % SUBMATRIX_K) < K))
         {
             B_block[i] = B[K*B_col + k0 + (i % SUBMATRIX_K)];
         }
@@ -120,7 +120,7 @@ __global__ void myGEMM_fast_kernel(double *A, double *B, double *C,
         {
             for(int k = 0; k < SUBMATRIX_K; k++)
             {
-                if((k0 + k) < K) // TODO
+                if((k0 + k) < K) 
                     C_out[j] += A_block[k] * B_block[SUBMATRIX_K*j + k];
             }
         }
@@ -181,11 +181,12 @@ myGEMM_med_kernel(double *A, double *B, double *C,
 }
 
 
+template<bool IncludeOffset, bool TransposeA, bool TransposeB>
 __global__ void 
 __launch_bounds__(256)
 myGEMM_tile_kernel(double *A, double *B, double *C,
-                                   double alpha, double beta,
-                                   int M, int N, int K)
+                   double alpha, double beta,
+                   int M, int N, int K)
 {
     int block_root_i0 = 64*blockIdx.x;
     int block_root_j0 = 64*blockIdx.y;
@@ -209,19 +210,36 @@ myGEMM_tile_kernel(double *A, double *B, double *C,
 
         // Update the shared memory
         __syncthreads();
-        A_submat[threadIdx.x][threadIdx.y] = 
-          ((block_root_i0 + threadIdx.x < M) ? ((k0 + threadIdx.y < K) ?
-           A[(block_root_i0 + threadIdx.x) + M*(k0 + threadIdx.y)] : 0) : 0);
+        if(TransposeA)
+        {
+            A_submat[threadIdx.x][threadIdx.y] = 
+              ((block_root_i0 + threadIdx.x < M) ? ((k0 + threadIdx.y < K) ?
+               A[K*(block_root_i0 + threadIdx.x) + (k0 + threadIdx.y)] : 0): 0);
 
-        B_submat[threadIdx.y][threadIdx.x] =
-          ((block_root_j0 + threadIdx.x < N) ? ((k0 + threadIdx.y < K) ?
-           B[(k0 + threadIdx.y) + K*(block_root_j0 + threadIdx.x)] : 0) : 0);
+        } else {
+            A_submat[threadIdx.x][threadIdx.y] = 
+              ((block_root_i0 + threadIdx.x < M) ? ((k0 + threadIdx.y < K) ?
+               A[(block_root_i0 + threadIdx.x) + M*(k0 + threadIdx.y)] : 0): 0);
+        }
+
+        if(TransposeB)
+        {
+            B_submat[threadIdx.y][threadIdx.x] = 
+              ((block_root_j0 + threadIdx.x < N) ? ((k0 + threadIdx.y < K) ?
+               B[(block_root_j0 + threadIdx.x) + N*(k0 + threadIdx.y)] : 0): 0);
+        } else {
+            B_submat[threadIdx.x % 4][threadIdx.x/4 + 16*threadIdx.y] =
+              ((block_root_j0 + threadIdx.x/4 + 16*threadIdx.y < N) ? 
+              ((k0 + (threadIdx.x % 4) < K) ?
+               B[(k0 + (threadIdx.x % 4)) + K*(block_root_j0 + threadIdx.x/4 +
+                   16*threadIdx.y)] : 0) : 0);
+        }
 
         __syncthreads();
 
 
         // Loop through the tiles accumulating the product at each
-#pragma unroll 4
+#pragma unroll 3
         for(int k = 0; k < 4; k++)
         {
             // Step 1: Copy the fragments of A and B for this thread.
@@ -249,18 +267,15 @@ myGEMM_tile_kernel(double *A, double *B, double *C,
               {
                   C[(block_root_i0 + tile_root_i + 16*i + l) 
                     + M*(block_root_j0 + tile_root_j + 8*j + m)] =
-                    alpha*product[2*i + l][2*j + m] + beta *
+                    alpha*product[2*i + l][2*j + m] +
+                    (IncludeOffset ? 
+                    beta *
                     C[(block_root_i0 + tile_root_i + 16*i + l) 
-                      + M*(block_root_j0 + tile_root_j + 8*j + m)];
+                      + M*(block_root_j0 + tile_root_j + 8*j + m)] : 0);
               }
 
           }
-// TODO
 }
-
-
-
-
 
 
 /**
@@ -324,60 +339,6 @@ __global__ void myGEMM_kernel(double *A, double *B, double *C,
     }
 }
 
-/*
- * \brief Routine to perform an in-place GEMM operation, i.e., C := alpha*A*B +
- * beta*C. 
- * 
- * This function performs the in-place GEMM operation accelerated by the GPU.
- * The arguments are as follows:
- * 
- * A is an MxK matrix of doubles in col-major format.
- * B is an KxN matrix of doubles in col-major format.
- * C is an MxN matrix of doubles in col-major format.
- * alpha is the address of a scalar to multiply AB by before adding it to the
- * final result.
- * beta is the address of a scalar to multiply C by before adding alpha*AB to
- * it.
- *
- * Note that A, B, and C are pointers to device memory whereas alpha and beta
- * are pointers to host memory.
- */
-int myGEMM(double* A, double* B, double* C, double* alpha, double* beta, int M,
-           int N, int K) {
-
-    dim3 blockSize (BLOCK_SIZE, BLOCK_SIZE);
-    dim3 gridSize (std::min((int)((M + blockSize.x - 1)/blockSize.x), MAX_GRID_SIZE),
-                   std::min((int)((N + blockSize.y - 1)/blockSize.y), MAX_GRID_SIZE));
-
-
-    //myGEMM_med_kernel<<<gridSize, blockSize>>>(A, B, C, *alpha, *beta, M, N, K);
-
-    //myGEMM_kernel<Identity, true, false, false><<<gridSize, blockSize>>>(
-    //    A, B, C, *alpha, *beta, M, N, K);
-
-    //dim3 blockSize (16, 4);
-    //dim3 gridSize  ((M + (blockSize.x*blockSize.y) - 1)/(blockSize.x*blockSize.y),
-    //                (N + RESULT_BLOCK_Y - 1)/RESULT_BLOCK_Y);
-
-    //myGEMM_fast_kernel<<<gridSize, blockSize>>>(
-    //    A, B, C, *alpha, *beta, M, N, K);
-
-    // TODO
-    blockSize.x = 64;
-    blockSize.y = 4;
-    gridSize.x = (M + 63)/64;
-    gridSize.y = (N + 63)/64;
-
-    myGEMM_tile_kernel<<<gridSize, blockSize>>>(A, B, C, *alpha, *beta, M, N, K);
-
-    check_launch("myGEMM_kernel");
-
-    return 0;
-}
-
-/******************************************************************************\
- * Section 3: Feed Forward Special Functions                                  *
-\******************************************************************************/
 
 /**
  * \brief Kernel for Matrix multiplication with vector accumulator.
@@ -431,6 +392,164 @@ __global__ void GEMM_vector_kernel(double *A, double *B, double *C, double *v,
         }
     }
 }
+
+template<class PostOp>
+__global__ void 
+__launch_bounds__(256)
+GEMM_vector_tile_kernel(double *A, double *B, double *C, double *v,
+                                   int M, int N, int K)
+{
+    int block_root_i0 = 64*blockIdx.x;
+    int block_root_j0 = 64*blockIdx.y;
+
+    __shared__ double A_submat[64][4];
+    __shared__ double B_submat[4][64];
+
+    double product[4][4];
+    double A_frag[4];
+    double B_frag[4];
+
+    for(int i = 0; i < 4; i++)
+        for(int j = 0; j < 4; j++)
+            product[i][j] = 0;
+
+    int tile_root_i = (threadIdx.x/32) * 32 + 2*(threadIdx.x % 8);
+    int tile_root_j = threadIdx.y*16 + ((threadIdx.x % 32)/8) * 2;
+
+    for(int k0 = 0; k0 < K; k0 += 4)
+    {
+
+        // Update the shared memory
+        __syncthreads();
+        A_submat[threadIdx.x][threadIdx.y] = 
+          ((block_root_i0 + threadIdx.x < M) ? ((k0 + threadIdx.y < K) ?
+           A[(block_root_i0 + threadIdx.x) + M*(k0 + threadIdx.y)] : 0): 0);
+
+        B_submat[threadIdx.x % 4][threadIdx.x/4 + 16*threadIdx.y] =
+          ((block_root_j0 + threadIdx.x/4 + 16*threadIdx.y < N) ? 
+          ((k0 + (threadIdx.x % 4) < K) ?
+           B[(k0 + (threadIdx.x % 4)) + K*(block_root_j0 + threadIdx.x/4 +
+               16*threadIdx.y)] : 0) : 0);
+        __syncthreads();
+
+
+        // Loop through the tiles accumulating the product at each
+#pragma unroll 3
+        for(int k = 0; k < 4; k++)
+        {
+            // Step 1: Copy the fragments of A and B for this thread.
+            for(int i = 0; i < 2; i++)
+                for(int l = 0; l < 2; l++)
+                {
+                    A_frag[2*i + l] = A_submat[tile_root_i + 16*i + l][k];
+                    B_frag[2*i + l] = B_submat[k][tile_root_j +  8*i + l];
+                }
+            // Step 2: Accumulate the product:
+            for(int i = 0; i < 4; i++)
+                for(int j = 0; j < 4; j++)
+                    product[i][j] += A_frag[i]*B_frag[j];
+        }
+    }
+    // Now update C
+#pragma unroll 4
+    for(int i = 0; i < 2; i++)
+      for(int j = 0; j < 2; j++)
+        for(int l = 0; l < 2; l++)
+          for(int m = 0; m < 2; m++)
+          {
+              if((block_root_i0 + tile_root_i + 16*i + l < M) &&
+                 (block_root_j0 + tile_root_j + 8*j + m < N))
+              {
+                  C[(block_root_i0 + tile_root_i + 16*i + l) 
+                    + M*(block_root_j0 + tile_root_j + 8*j + m)] =
+                    PostOp::func(
+                    product[2*i + l][2*j + m] +
+                    v[(block_root_i0 + tile_root_i + 16*i + l)]); 
+              }
+
+          }
+}
+
+template<class PostOp, bool IncludeOffset, bool TransposeA, bool TransposeB,
+         bool Vector>
+void smart_GEMM_wrapper(double *A, double *B, double *C, double *v,
+                        double alpha, double beta,
+                        int M, int N, int K)
+{
+    dim3 blockSize (BLOCK_SIZE, BLOCK_SIZE);
+    dim3 gridSize  ((M + BLOCK_SIZE - 1)/BLOCK_SIZE, 
+                    (N + BLOCK_SIZE - 1)/BLOCK_SIZE);
+    if(Vector) 
+    {
+        if((M < 64) || (N < 64))
+        {
+            GEMM_vector_kernel<PostOp><<<gridSize, blockSize>>>(
+                    A, B, C, v, M, N, K);
+        } else {
+            blockSize.x = 64;
+            blockSize.y = 4;
+            gridSize.x  = (M + 63)/64;
+            gridSize.y  = (N + 63)/64;
+            GEMM_vector_tile_kernel<PostOp><<<gridSize, blockSize>>>(
+                    A, B, C, v, M, N, K);
+        }
+
+    } else {
+        if((M < 64) || (N < 64))
+        {
+            myGEMM_kernel<PostOp, IncludeOffset, TransposeA, 
+                           TransposeB><<<gridSize, blockSize>>>(
+                                   A, B, C, alpha, beta, M, N, K);
+        } else {
+            blockSize.x = 64;
+            blockSize.y = 4;
+            gridSize.x  = (M + 63)/64;
+            gridSize.y  = (N + 63)/64;
+            myGEMM_tile_kernel<IncludeOffset, TransposeA, 
+                               TransposeB><<<gridSize, blockSize>>>(
+                                   A, B, C, alpha, beta, M, N, K);
+        }
+
+    }
+}
+
+
+/*
+ * \brief Routine to perform an in-place GEMM operation, i.e., C := alpha*A*B +
+ * beta*C. 
+ * 
+ * This function performs the in-place GEMM operation accelerated by the GPU.
+ * The arguments are as follows:
+ * 
+ * A is an MxK matrix of doubles in col-major format.
+ * B is an KxN matrix of doubles in col-major format.
+ * C is an MxN matrix of doubles in col-major format.
+ * alpha is the address of a scalar to multiply AB by before adding it to the
+ * final result.
+ * beta is the address of a scalar to multiply C by before adding alpha*AB to
+ * it.
+ *
+ * Note that A, B, and C are pointers to device memory whereas alpha and beta
+ * are pointers to host memory.
+ */
+int myGEMM(double* A, double* B, double* C, double* alpha, double* beta, int M,
+           int N, int K) {
+
+    smart_GEMM_wrapper<Identity, true, false, false, false>(
+            A, B, C, NULL, *alpha, *beta, M, N, K);
+
+    check_launch("myGEMM_kernel");
+
+    return 0;
+}
+
+
+
+
+/******************************************************************************\
+ * Section 3: Feed Forward Special Functions                                  *
+\******************************************************************************/
+
 
 /**
  * \brief Kernel for finding the softmax
@@ -494,24 +613,17 @@ int myFeedForward(deviceCache &d, double* X, int N)
     int M = d.M;
 
     // Step 1: First layer. We want to compute A1 which is M by N
-    dim3 blockSize (BLOCK_SIZE, BLOCK_SIZE);
-    dim3 gridSize (std::min((int)((M + blockSize.x - 1)/blockSize.x), MAX_GRID_SIZE),
-                   std::min((int)((N + blockSize.y - 1)/blockSize.y), MAX_GRID_SIZE));
-
+    dim3 blockSize (64, 4);
+    dim3 gridSize ((M + 63)/64, (N + 63)/64);
 
     // Use our vector-accumulating GEM to compute A1
-    GEMM_vector_kernel<Sigmoid><<<gridSize, blockSize>>>(
-        W1, X, A1, b1, M, N, K);
-
-    //check_launch("GEMM_vector_kernel layer1");
+    smart_GEMM_wrapper<Sigmoid, true, false, false, true>(
+            W1, X, A1, b1, 1, 1, M, N, K);
 
     // Step 2a: Second layer. We want to compute A2. We start by storing Z2 in
     // the space of A2
-    gridSize.x  = std::min((int)((L + blockSize.x - 1)/blockSize.x), MAX_GRID_SIZE);
-    gridSize.y  = std::min((int)((N + blockSize.y - 1)/blockSize.y), MAX_GRID_SIZE);
-    GEMM_vector_kernel<Identity><<<gridSize, blockSize>>>(
-        W2, A1, A2, b2, L, N, M);
-    //check_launch("GEMM_vector_kernel layer2");
+    smart_GEMM_wrapper<Identity, true, false, false, true>(
+            W2, A1, A2, b2, 1, 1, L, N, M);
 
     // Step 2b: Now we want to apply the softmax kernel to Z2 (which is stored
     // in A2) to get the correct A2 = yhat.
@@ -521,7 +633,6 @@ int myFeedForward(deviceCache &d, double* X, int N)
                            MAX_GRID_SIZE);
     gridSize.y  = 1;
     softmax_kernel<<<gridSize, blockSize>>>(A2, L, N);
-    //check_launch("softmax_kernel");
 
     return 0;
 }
@@ -873,46 +984,47 @@ int myBackPropogation(deviceCache &d, double *X, double *y, int N, double reg)
 
     // Step 2: Compute dW2
     onDeviceCopy(dW2, W2, L, M);
+
+    // Include offset, transpose A1
+    smart_GEMM_wrapper<Identity, true, false, true, false>(
+            diff, A1, dW2, NULL, 1, reg, L, M, N);
+
     blockSize.x = BLOCK_SIZE;
     blockSize.y = BLOCK_SIZE;
     gridSize.x  = std::min((int)((L + blockSize.x - 1)/blockSize.x), MAX_GRID_SIZE);
     gridSize.y  = std::min((int)((M + blockSize.y - 1)/blockSize.y), MAX_GRID_SIZE);
 
-    // Include offset, transpose A1
-    myGEMM_kernel<Identity, true, false, true><<<gridSize, blockSize>>>(
-        diff, A1, dW2, 1, reg, L, M, N);                                   
-    //check_launch("myGEMM_kernel");
-
     matrix_scale_kernel<<<gridSize, blockSize>>>(dW2, L, M, N);
     //check_launch("matrix_scale_kernel");
 
     // Step 3: Compute dA1
-    gridSize.x  = std::min((int)((M + blockSize.x - 1)/blockSize.x), MAX_GRID_SIZE);
-    gridSize.y  = std::min((int)((N + blockSize.y - 1)/blockSize.y), MAX_GRID_SIZE);
     // Do not include offset, transpose W2
-    myGEMM_kernel<Identity, false, true, false><<<gridSize, blockSize>>>(
-        W2, diff, dA1, 1, 1, M, N, L);                                     
-    //check_launch("myGEMM_kernel");
+    smart_GEMM_wrapper<Identity, false, true, false, false>(
+        W2, diff, dA1, NULL, 1, 1, M, N, L);
 
     // Step 4: Compute db2
     myRowSum(diff, d.db2, L, N);
 
     // Step 5: Compute dZ1
-    // Gridsize is still fine
+    blockSize.x = BLOCK_SIZE;
+    blockSize.y = BLOCK_SIZE;
+    gridSize.x  = std::min((int)((M + blockSize.x - 1)/blockSize.x), MAX_GRID_SIZE);
+    gridSize.y  = std::min((int)((N + blockSize.y - 1)/blockSize.y), MAX_GRID_SIZE);
     mySpecialHadamard_kernel<<<gridSize, blockSize>>>(dZ1, A1, M, N);      
     //check_launch("mySpecialHadamard_kernel");
 
     // Step 6: Compute dW1
     onDeviceCopy(dW1, W1, M, K);
+    smart_GEMM_wrapper<Identity, true, false, true, false>(
+            dZ1, X, dW1, NULL, 1, reg, M, K, N);
+
+
+    blockSize.x = BLOCK_SIZE;
+    blockSize.y = BLOCK_SIZE;
     gridSize.x  = std::min((int)((M + blockSize.x - 1)/blockSize.x), MAX_GRID_SIZE);
     gridSize.y  = std::min((int)((K + blockSize.y - 1)/blockSize.y), MAX_GRID_SIZE);
-    // Include offset, transpose X
-    myGEMM_kernel<Identity, true, false, true><<<gridSize, blockSize>>>(
-        dZ1, X, dW1, 1, reg, M, K, N);                                    
-    //check_launch("myGEMM_kernel");
 
     matrix_scale_kernel<<<gridSize, blockSize>>>(dW1, M, K, N);
-    //check_launch("matrix_scale_kernel");
 
     // Step 7: Compute db1
     myRowSum(dZ1, d.db1, M, N);

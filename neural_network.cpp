@@ -350,7 +350,7 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
     deviceCache dCache (K, L, M, N, batch_size);
     update_deviceCache_from_nn(nn, dCache);
 
-    int num_streams = 5;
+    int num_streams = 8;
     int stream_bounds[num_streams + 1];
     int stream_lens[num_streams];
     cudaStream_t stream[num_streams];

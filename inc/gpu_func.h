@@ -1,5 +1,6 @@
 #ifndef GPU_FUNC_H_
 #define GPU_FUNC_H_
+#define CUDA_API_PER_THREAD_DEFAULT_STREAM
 
 #include <cuda_runtime.h>
 #include <helper_cuda.h>
