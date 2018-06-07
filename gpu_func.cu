@@ -136,7 +136,9 @@ __global__ void myGEMM_fast_kernel(double *A, double *B, double *C,
 
 }
 
-__global__ void myGEMM_med_kernel(double *A, double *B, double *C,
+__global__ void
+__launch_bounds__(256)
+myGEMM_med_kernel(double *A, double *B, double *C,
                                    double alpha, double beta,
                                    int M, int N, int K)
 {
@@ -179,23 +181,28 @@ __global__ void myGEMM_med_kernel(double *A, double *B, double *C,
 }
 
 
-__global__ void myGEMM_tile_kernel(double *A, double *B, double *C,
+__global__ void 
+__launch_bounds__(256)
+myGEMM_tile_kernel(double *A, double *B, double *C,
                                    double alpha, double beta,
                                    int M, int N, int K)
 {
-    int block_root_i0 = 128*blockIdx.x;
-    int block_root_j0 = 128*blockIdx.y;
+    int block_root_i0 = 64*blockIdx.x;
+    int block_root_j0 = 64*blockIdx.y;
 
-    __shared__ double A_submat[128][4];
-    __shared__ double B_submat[4][128];
+    __shared__ double A_submat[64][4];
+    __shared__ double B_submat[4][64];
 
-    double product[8][8];
-    for(int i = 0; i < 8; i++)
-        for(int j = 0; j < 8; j++)
+    double product[4][4];
+    double A_frag[4];
+    double B_frag[4];
+
+    for(int i = 0; i < 4; i++)
+        for(int j = 0; j < 4; j++)
             product[i][j] = 0;
 
-    int tile_root_i = threadIdx.x/32 * 64 + 4*(threadIdx.x % 8);
-    int tile_root_j = threadIdx.y*32 + ((threadIdx.x % 32)/8) * 4;
+    int tile_root_i = (threadIdx.x/32) * 32 + 2*(threadIdx.x % 8);
+    int tile_root_j = threadIdx.y*16 + ((threadIdx.x % 32)/8) * 2;
 
     for(int k0 = 0; k0 < K; k0 += 4)
     {
@@ -206,58 +213,49 @@ __global__ void myGEMM_tile_kernel(double *A, double *B, double *C,
           ((block_root_i0 + threadIdx.x < M) ? ((k0 + threadIdx.y < K) ?
            A[(block_root_i0 + threadIdx.x) + M*(k0 + threadIdx.y)] : 0) : 0);
 
-        A_submat[blockDim.x + threadIdx.x][threadIdx.y] = 
-          ((block_root_i0 + blockDim.x + threadIdx.x < M) ? 
-           ((k0 + threadIdx.y < K) ?
-            A[(block_root_i0 + blockDim.x + threadIdx.x) 
-              + M*(k0 + threadIdx.y)] : 0) : 0);
-
-
         B_submat[threadIdx.y][threadIdx.x] =
           ((block_root_j0 + threadIdx.x < N) ? ((k0 + threadIdx.y < K) ?
            B[(k0 + threadIdx.y) + K*(block_root_j0 + threadIdx.x)] : 0) : 0);
-
-        B_submat[threadIdx.y][blockDim.x + threadIdx.x] =
-          ((block_root_j0 + threadIdx.x + blockDim.x < N) ? 
-           ((k0 + threadIdx.y < K) ?
-            B[(k0 + threadIdx.y) 
-              + K*(block_root_j0 + blockDim.x + threadIdx.x)] : 0) : 0);
 
         __syncthreads();
 
 
         // Loop through the tiles accumulating the product at each
-#pragma unroll 5
-        for(int i = 0; i < 2; i++)
-          for(int j = 0; j < 2; j++)
-            for(int l = 0; l < 4; l++)
-              for(int m = 0; m < 4; m++)
-                for(int k = 0; k < 4; k++)
+#pragma unroll 4
+        for(int k = 0; k < 4; k++)
+        {
+            // Step 1: Copy the fragments of A and B for this thread.
+            for(int i = 0; i < 2; i++)
+                for(int l = 0; l < 2; l++)
                 {
-                  product[4*i + l][4*j + m] += 
-                    A_submat[tile_root_i + 32*i + l][k] *
-                    B_submat[k][tile_root_j + 16*j + m];
+                    A_frag[2*i + l] = A_submat[tile_root_i + 16*i + l][k];
+                    B_frag[2*i + l] = B_submat[k][tile_root_j +  8*i + l];
                 }
+            // Step 2: Accumulate the product:
+            for(int i = 0; i < 4; i++)
+                for(int j = 0; j < 4; j++)
+                    product[i][j] += A_frag[i]*B_frag[j];
+        }
     }
     // Now update C
 #pragma unroll 4
     for(int i = 0; i < 2; i++)
       for(int j = 0; j < 2; j++)
-        for(int l = 0; l < 4; l++)
-          for(int m = 0; m < 4; m++)
+        for(int l = 0; l < 2; l++)
+          for(int m = 0; m < 2; m++)
           {
-              if((block_root_i0 + tile_root_i + 32*i + l < M) &&
-                 (block_root_j0 + tile_root_j + 16*j + m < N))
+              if((block_root_i0 + tile_root_i + 16*i + l < M) &&
+                 (block_root_j0 + tile_root_j + 8*j + m < N))
               {
-                  C[(block_root_i0 + tile_root_i + 32*i + l) 
-                    + M*(block_root_j0 + tile_root_j + 16*j + m)] =
-                    alpha*product[4*i + l][4*j + m] + beta *
-                    C[(block_root_i0 + tile_root_i + 32*i + l) 
-                      + M*(block_root_j0 + tile_root_j + 16*j + m)];
+                  C[(block_root_i0 + tile_root_i + 16*i + l) 
+                    + M*(block_root_j0 + tile_root_j + 8*j + m)] =
+                    alpha*product[2*i + l][2*j + m] + beta *
+                    C[(block_root_i0 + tile_root_i + 16*i + l) 
+                      + M*(block_root_j0 + tile_root_j + 8*j + m)];
               }
 
           }
-
+// TODO
 }
 
 
@@ -364,10 +362,11 @@ int myGEMM(double* A, double* B, double* C, double* alpha, double* beta, int M,
     //myGEMM_fast_kernel<<<gridSize, blockSize>>>(
     //    A, B, C, *alpha, *beta, M, N, K);
 
+    // TODO
     blockSize.x = 64;
     blockSize.y = 4;
-    gridSize.x = (M + 127)/128;
-    gridSize.y = (N + 127)/128;
+    gridSize.x = (M + 63)/64;
+    gridSize.y = (N + 63)/64;
 
     myGEMM_tile_kernel<<<gridSize, blockSize>>>(A, B, C, *alpha, *beta, M, N, K);
 
