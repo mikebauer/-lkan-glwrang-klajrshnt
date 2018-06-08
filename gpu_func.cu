@@ -136,11 +136,14 @@ __global__ void myGEMM_fast_kernel(double *A, double *B, double *C,
 
 }
 
+template<bool IncludeOffset, bool TransposeA, bool TransposeB>
 __global__ void
 __launch_bounds__(256)
-myGEMM_med_kernel(double *A, double *B, double *C,
-                                   double alpha, double beta,
-                                   int M, int N, int K)
+myGEMM_shared_kernel(double const * const __restrict__ A, 
+                     double const * const __restrict__ B, 
+                     double * __restrict__ C,
+                     const double alpha, const double beta,
+                     const int M, const int N, const int K)
 {
     int row = blockIdx.x*blockDim.x + threadIdx.x;
     int col = blockIdx.y*blockDim.y + threadIdx.y;
@@ -152,20 +155,39 @@ myGEMM_med_kernel(double *A, double *B, double *C,
 
 
     product  = 0;
-    old_val = C[row + M*col];
+    old_val = (IncludeOffset ? C[row + M*col] : 0);
     
     for(int k0 = 0; k0 < K; k0 += blockDim.x)
     {
         __syncthreads();
         // Step 1: Update A_submat:
-        if(k0 + threadIdx.y < K)
+        if(TransposeA) 
+        {
+            A_submat[threadIdx.y + blockDim.x*threadIdx.x] 
+                = ((k0 + threadIdx.x < K) ?
+                   ((row - threadIdx.x + threadIdx.y < M) ? 
+                    A[(k0 + threadIdx.x) + 
+                      K*(row - threadIdx.x + threadIdx.y)] : 0) : 0);
+        } else {
             A_submat[threadIdx.x + blockDim.x*threadIdx.y] 
-                = (row < M) ? A[row + M*(k0 + threadIdx.y)] : 0;
+                = ((k0 + threadIdx.y < K) ?
+                   ((row < M) ? A[row + M*(k0 + threadIdx.y)] : 0) : 0);
+        }
     
         // Step 2: Update B_submat:
-        if(k0 + threadIdx.x < K)
+        if(TransposeB)
+        {
+            B_submat[threadIdx.y + blockDim.x*threadIdx.x] 
+                = ((k0 + threadIdx.y < K) ?
+                   ((col - threadIdx.y + threadIdx.x < N) ? 
+                    B[(col - threadIdx.y + threadIdx.x) + 
+                      N*(k0 + threadIdx.y)] : 0) : 0);
+            
+        } else {
             B_submat[threadIdx.x + blockDim.x*threadIdx.y]
-                = (col < N) ? B[(k0 + threadIdx.x) + K*col] : 0;
+                = ((k0 + threadIdx.x < K) ? 
+                ((col < N) ? B[(k0 + threadIdx.x) + K*col] : 0) : 0);
+        }
         __syncthreads();
         
         // Step 3: Accumulate the results:
@@ -184,26 +206,24 @@ myGEMM_med_kernel(double *A, double *B, double *C,
 template<bool IncludeOffset, bool TransposeA, bool TransposeB>
 __global__ void 
 __launch_bounds__(256)
-myGEMM_tile_kernel(double *A, double *B, double *C,
-                   double alpha, double beta,
-                   int M, int N, int K)
+myGEMM_tile_kernel(double const * const __restrict__ A, 
+                   double const * const __restrict__ B, 
+                   double * __restrict__ C,
+                   const double alpha, const double beta,
+                   const int M, const int N, const int K)
 {
-    int block_root_i0 = 64*blockIdx.x;
-    int block_root_j0 = 64*blockIdx.y;
+    const int block_root_i0 = 64*blockIdx.x;
+    const int block_root_j0 = 64*blockIdx.y;
 
     __shared__ double A_submat[64][4];
     __shared__ double B_submat[4][64];
 
-    double product[4][4];
+    double product[4][4] = {{0}};
     double A_frag[4];
     double B_frag[4];
 
-    for(int i = 0; i < 4; i++)
-        for(int j = 0; j < 4; j++)
-            product[i][j] = 0;
-
-    int tile_root_i = (threadIdx.x/32) * 32 + 2*(threadIdx.x % 8);
-    int tile_root_j = threadIdx.y*16 + ((threadIdx.x % 32)/8) * 2;
+    const int tile_root_i = (threadIdx.x/32) * 32 + 2*(threadIdx.x % 8);
+    const int tile_root_j = threadIdx.y*16 + ((threadIdx.x % 32)/8) * 2;
 
     for(int k0 = 0; k0 < K; k0 += 4)
     {
@@ -212,9 +232,11 @@ myGEMM_tile_kernel(double *A, double *B, double *C,
         __syncthreads();
         if(TransposeA)
         {
-            A_submat[threadIdx.x][threadIdx.y] = 
-              ((block_root_i0 + threadIdx.x < M) ? ((k0 + threadIdx.y < K) ?
-               A[K*(block_root_i0 + threadIdx.x) + (k0 + threadIdx.y)] : 0): 0);
+            A_submat[threadIdx.x/4 + 16*threadIdx.y][threadIdx.x % 4] = 
+              ((block_root_i0 + threadIdx.x/4 + 16*threadIdx.y < M) ? 
+              ((k0 + (threadIdx.x % 4) < K) ?
+               A[(k0 + (threadIdx.x % 4)) + K*(block_root_i0 + threadIdx.x/4 +
+                   16*threadIdx.y)] : 0) : 0);
 
         } else {
             A_submat[threadIdx.x][threadIdx.y] = 
@@ -394,6 +416,52 @@ __global__ void GEMM_vector_kernel(double *A, double *B, double *C, double *v,
 }
 
 template<class PostOp>
+__global__ void
+__launch_bounds__(256)
+GEMM_vector_shared_kernel(double *A, double *B, double *C, double *v,
+                          int M, int N, int K)
+{
+    int row = blockIdx.x*blockDim.x + threadIdx.x;
+    int col = blockIdx.y*blockDim.y + threadIdx.y;
+
+    double old_val, product;
+
+    __shared__ double A_submat[BLOCK_SIZE*BLOCK_SIZE];
+    __shared__ double B_submat[BLOCK_SIZE*BLOCK_SIZE];
+
+
+    product  = 0;
+    old_val = v[row];
+    
+    for(int k0 = 0; k0 < K; k0 += blockDim.x)
+    {
+        __syncthreads();
+        // Step 1: Update A_submat:
+        A_submat[threadIdx.x + blockDim.x*threadIdx.y] 
+            = ((k0 + threadIdx.y < K) ?
+               ((row < M) ? A[row + M*(k0 + threadIdx.y)] : 0) : 0);
+    
+        // Step 2: Update B_submat:
+        B_submat[threadIdx.x + blockDim.x*threadIdx.y]
+            = ((k0 + threadIdx.x < K) ? 
+            ((col < N) ? B[(k0 + threadIdx.x) + K*col] : 0) : 0);
+
+        __syncthreads();
+        
+        // Step 3: Accumulate the results:
+        int num_iters = min(K - k0, blockDim.x);
+        for(int k = 0; k < num_iters; k++) 
+        {
+            product += A_submat[threadIdx.x + k*blockDim.x] *
+                       B_submat[k + threadIdx.y*blockDim.x];
+        }
+    }
+    if((row < M) && (col < N))
+        C[row + M*col] = PostOp::func(product + old_val);
+}
+
+
+template<class PostOp>
 __global__ void 
 __launch_bounds__(256)
 GEMM_vector_tile_kernel(double *A, double *B, double *C, double *v,
@@ -483,7 +551,7 @@ void smart_GEMM_wrapper(double *A, double *B, double *C, double *v,
     {
         if((M < 64) || (N < 64))
         {
-            GEMM_vector_kernel<PostOp><<<gridSize, blockSize>>>(
+            GEMM_vector_shared_kernel<PostOp><<<gridSize, blockSize>>>(
                     A, B, C, v, M, N, K);
         } else {
             blockSize.x = 64;
@@ -497,7 +565,7 @@ void smart_GEMM_wrapper(double *A, double *B, double *C, double *v,
     } else {
         if((M < 64) || (N < 64))
         {
-            myGEMM_kernel<PostOp, IncludeOffset, TransposeA, 
+            myGEMM_shared_kernel<IncludeOffset, TransposeA, 
                            TransposeB><<<gridSize, blockSize>>>(
                                    A, B, C, alpha, beta, M, N, K);
         } else {
