@@ -105,8 +105,6 @@ int compareGEMMResults(double* myC, double* refC, int NI, int NJ) {
     arma::mat mysol = arma::mat(myC, NI, NJ, false);
     arma::mat refsol = arma::mat(refC, NI, NJ, false);
 
-    std::cout << mysol(0, 0) << std::endl << refsol(0, 0) << std::endl;
-
     double reldiff = arma::norm(mysol-refsol,"inf")/arma::norm(refsol,"inf");
 
     if(reldiff > GEMM_TOL) {
@@ -240,7 +238,7 @@ void TestGEMM(int M, int N, int K) {
 
     int fail = compareGEMMResults(C1, C2, M, N);
 
-    if(true) {
+    if(fail == 0) {
         std::cout << "Time for reference GEMM implementation: "
                   //<< refend - refstart << std::endl;
                   << ref_time_span.count() << " seconds" << std::endl;

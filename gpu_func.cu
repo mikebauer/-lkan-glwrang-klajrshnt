@@ -150,8 +150,8 @@ myGEMM_shared_kernel(double const * const __restrict__ A,
 
     double old_val, product;
 
-    __shared__ double A_submat[BLOCK_SIZE*BLOCK_SIZE];
-    __shared__ double B_submat[BLOCK_SIZE*BLOCK_SIZE];
+    __shared__ double A_submat[BLOCK_SIZE*(BLOCK_SIZE + 1)];
+    __shared__ double B_submat[BLOCK_SIZE*(BLOCK_SIZE + 1)];
 
 
     product  = 0;
@@ -163,13 +163,13 @@ myGEMM_shared_kernel(double const * const __restrict__ A,
         // Step 1: Update A_submat:
         if(TransposeA) 
         {
-            A_submat[threadIdx.y + blockDim.x*threadIdx.x] 
+            A_submat[threadIdx.y + (blockDim.x + 1)*threadIdx.x] 
                 = ((k0 + threadIdx.x < K) ?
                    ((row - threadIdx.x + threadIdx.y < M) ? 
                     A[(k0 + threadIdx.x) + 
                       K*(row - threadIdx.x + threadIdx.y)] : 0) : 0);
         } else {
-            A_submat[threadIdx.x + blockDim.x*threadIdx.y] 
+            A_submat[threadIdx.x + (blockDim.x + 1)*threadIdx.y] 
                 = ((k0 + threadIdx.y < K) ?
                    ((row < M) ? A[row + M*(k0 + threadIdx.y)] : 0) : 0);
         }
@@ -177,14 +177,14 @@ myGEMM_shared_kernel(double const * const __restrict__ A,
         // Step 2: Update B_submat:
         if(TransposeB)
         {
-            B_submat[threadIdx.y + blockDim.x*threadIdx.x] 
+            B_submat[threadIdx.y + (blockDim.x+1)*threadIdx.x] 
                 = ((k0 + threadIdx.y < K) ?
                    ((col - threadIdx.y + threadIdx.x < N) ? 
                     B[(col - threadIdx.y + threadIdx.x) + 
                       N*(k0 + threadIdx.y)] : 0) : 0);
             
         } else {
-            B_submat[threadIdx.x + blockDim.x*threadIdx.y]
+            B_submat[threadIdx.x + (blockDim.x+1)*threadIdx.y]
                 = ((k0 + threadIdx.x < K) ? 
                 ((col < N) ? B[(k0 + threadIdx.x) + K*col] : 0) : 0);
         }
@@ -194,8 +194,8 @@ myGEMM_shared_kernel(double const * const __restrict__ A,
         int num_iters = min(K - k0, blockDim.x);
         for(int k = 0; k < num_iters; k++) 
         {
-            product += A_submat[threadIdx.x + k*blockDim.x] *
-                       B_submat[k + threadIdx.y*blockDim.x];
+            product += A_submat[threadIdx.x + k*(blockDim.x+1)] *
+                       B_submat[k + threadIdx.y*(blockDim.x+1)];
         }
     }
     if((row < M) && (col < N))
@@ -215,8 +215,8 @@ myGEMM_tile_kernel(double const * const __restrict__ A,
     const int block_root_i0 = 64*blockIdx.x;
     const int block_root_j0 = 64*blockIdx.y;
 
-    __shared__ double A_submat[64][4];
-    __shared__ double B_submat[4][64];
+    __shared__ double A_submat[65][4]; // TODO
+    __shared__ double B_submat[5][64];
 
     double product[4][4] = {{0}};
     double A_frag[4];
@@ -426,8 +426,8 @@ GEMM_vector_shared_kernel(double *A, double *B, double *C, double *v,
 
     double old_val, product;
 
-    __shared__ double A_submat[BLOCK_SIZE*BLOCK_SIZE];
-    __shared__ double B_submat[BLOCK_SIZE*BLOCK_SIZE];
+    __shared__ double A_submat[BLOCK_SIZE*(BLOCK_SIZE+1)];
+    __shared__ double B_submat[BLOCK_SIZE*(BLOCK_SIZE+1)];
 
 
     product  = 0;
@@ -437,12 +437,12 @@ GEMM_vector_shared_kernel(double *A, double *B, double *C, double *v,
     {
         __syncthreads();
         // Step 1: Update A_submat:
-        A_submat[threadIdx.x + blockDim.x*threadIdx.y] 
+        A_submat[threadIdx.x + (blockDim.x+1)*threadIdx.y] 
             = ((k0 + threadIdx.y < K) ?
                ((row < M) ? A[row + M*(k0 + threadIdx.y)] : 0) : 0);
     
         // Step 2: Update B_submat:
-        B_submat[threadIdx.x + blockDim.x*threadIdx.y]
+        B_submat[threadIdx.x + (blockDim.x+1)*threadIdx.y]
             = ((k0 + threadIdx.x < K) ? 
             ((col < N) ? B[(k0 + threadIdx.x) + K*col] : 0) : 0);
 
@@ -452,8 +452,8 @@ GEMM_vector_shared_kernel(double *A, double *B, double *C, double *v,
         int num_iters = min(K - k0, blockDim.x);
         for(int k = 0; k < num_iters; k++) 
         {
-            product += A_submat[threadIdx.x + k*blockDim.x] *
-                       B_submat[k + threadIdx.y*blockDim.x];
+            product += A_submat[threadIdx.x + k*(blockDim.x+1)] *
+                       B_submat[k + threadIdx.y*(blockDim.x+1)];
         }
     }
     if((row < M) && (col < N))
@@ -470,8 +470,8 @@ GEMM_vector_tile_kernel(double *A, double *B, double *C, double *v,
     int block_root_i0 = 64*blockIdx.x;
     int block_root_j0 = 64*blockIdx.y;
 
-    __shared__ double A_submat[64][4];
-    __shared__ double B_submat[4][64];
+    __shared__ double A_submat[65][4];
+    __shared__ double B_submat[5][64];
 
     double product[4][4];
     double A_frag[4];
@@ -563,7 +563,7 @@ void smart_GEMM_wrapper(double *A, double *B, double *C, double *v,
         }
 
     } else {
-        if((M < 64) || (N < 64))
+        if(false)
         {
             myGEMM_shared_kernel<IncludeOffset, TransposeA, 
                            TransposeB><<<gridSize, blockSize>>>(
