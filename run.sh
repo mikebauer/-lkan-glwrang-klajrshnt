@@ -43,9 +43,9 @@ echo ----------------
 #MV2_USE_CUDA=1 mpirun -np 1 nvprof --kernels "myGEMM_tile_kernel" --analysis-metrics --output-profile GEMMmetrics.out.%p.nvprof ./main -g 4
 #./a.out
 #cuda-memcheck --leak-check full ./main -e 1
-#mpirun -np 1 ./main -g 4
-mpirun -np 4 ./main -b 200
-mpirun -np 4 ./main -b 400
-mpirun -np 4 ./main -b 800
-mpirun -np 4 ./main -b 1600
-mpirun -np 4 ./main -b 3200
+#mpirun -np 1 ./main -g 1
+mpirun -np 4 ./main -g 1
+mpirun -np 4 ./main -g 2
+mpirun -np 4 ./main -g 3
+mpirun -np 4 ./main -g 4
+mpirun -np 4 ./main

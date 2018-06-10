@@ -46,6 +46,9 @@ int myGEMM(double* A, double* B, double* C, double* alpha, double* beta, int M,
            int N, int K);
 
 
+/**
+ * \brief A simple class to hold neural network parameters on the device.
+ */
 class deviceCache {
   public:
     double *A1, *W1, *b1;
@@ -55,6 +58,16 @@ class deviceCache {
 
     double *db1, *db2;
 
+    // Description of Dimension Variables:
+    // X  is KxN
+    // W1 is MxK
+    // b1 is Mx1
+    // A1 is MxN
+    //
+    // W2 is LxM
+    // b2 is Lx1
+    // A2 is LxN
+    // y  is LxN
     int K, L, M, N;
     int grad_len;
 
@@ -75,9 +88,12 @@ class deviceCache {
         checkCudaErrors(cudaMalloc((void **)&b2, L * sizeof(double)));
 
 
-        // Put all of the gradients in a single place. We don't want misaligned
-        // memory reads/writes in our kernels, so we need to align everything to
-        // the nearest 16 doubles. Store in order dW1, db1, dW2, db2
+        // Put all of the gradients in a single place. We want to minimize
+        // misaligned memory reads/writes in our kernels, so we need to align
+        // everything to the nearest 16 doubles. This doesn't actually matter
+        // all that much because the strides my not be multiples of 16, but it
+        // is not hard to do this anyway. Store in order dW1, db1, dW2,
+        // db2.
         grad_len = 16*((M*K + 15)/16) + 16*((M + 15)/16)
                  + 16*((L*M + 15)/16) + 16*((L + 15)/16);
 

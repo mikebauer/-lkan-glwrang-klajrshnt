@@ -5,7 +5,6 @@
 #include "gpu_func.h"
 #include "mpi.h"
 #include "iomanip"
-#include <cuda_runtime.h> // TODO
 
 #define MPI_SAFE_CALL( call ) do {                               \
     int err = call;                                              \
@@ -328,9 +327,8 @@ void update_deviceCache_from_nn(NeuralNetwork& nn, deviceCache& dCache)
  */
 void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
                     double learning_rate, double reg,
-                    const int epochs, const int batch_size, bool grad_check, int print_every,
-                    int debug) {
-
+                    const int epochs, const int batch_size, bool grad_check, 
+                    int print_every, int debug) {
     int rank, num_procs;
     MPI_SAFE_CALL(MPI_Comm_size(MPI_COMM_WORLD, &num_procs));
     MPI_SAFE_CALL(MPI_Comm_rank(MPI_COMM_WORLD, &rank));
@@ -342,14 +340,30 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
     error_file.open("Outputs/CpuGpuDiff.txt");
     int print_flag = 0;
 
+
+    // Description of Dimension Variables:
+    // X  is KxN
+    // W1 is MxK
+    // b1 is Mx1
+    // A1 is MxN
+    //
+    // W2 is LxM
+    // b2 is Lx1
+    // A2 is LxN
+    // y  is LxN
     int K = nn.H[0];
     int M = nn.H[1];
     // N already defined
     int L = nn.H[2];
 
+    // Initialize memory on the device to store the neural network. Initialize
+    // it with the correct data.
     deviceCache dCache (K, L, M, N, batch_size);
     update_deviceCache_from_nn(nn, dCache);
 
+
+    // Set up the streams to be used in copying the gradients to and from
+    // device.
     int num_streams = 8;
     int stream_bounds[num_streams + 1];
     int stream_lens[num_streams];
@@ -363,15 +377,12 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
     for(int i = 0; i < num_streams; i++)
         stream_lens[i] = stream_bounds[i+1] - stream_bounds[i];
 
-    /* HINT: You can obtain a raw pointer to the memory used by Armadillo Matrices
-       for storing elements in a column major way. Or you can allocate your own array
-       memory space and store the elements in a row major way. Remember to update the
-       Armadillo matrices in NeuralNetwork &nn of rank 0 before returning from the function. */
-
-    /* iter is a variable used to manage debugging. It increments in the inner loop
-       and therefore goes from 0 to epochs*num_batches */
+    /* iter is a variable used to manage debugging. It increments in the inner
+     * loop and therefore goes from 0 to epochs*num_batches */
     int iter = 0;
 
+
+    // Initialize memory to hold all of the gradients on the host.
     double *gradients;
     double *gradients_g;
 
@@ -384,17 +395,20 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
     // Find the maximum possible number of images per process per batch. 
     int N_proc = (batch_size + (num_procs) - 1)/num_procs;
 
-    double *X_proc;// = (double *)malloc(K*N_proc*sizeof(double));
-    double *y_proc;// = (double *)malloc(L*N_proc*sizeof(double));
+    // Allocate enough space to hold the number of images each process must
+    // handle. Alloc this space on host and device:
+    double *X_proc;
+    double *y_proc;
     checkCudaErrors(cudaMallocHost((void **)&X_proc, K*N_proc*sizeof(double)));
     checkCudaErrors(cudaMallocHost((void **)&y_proc, L*N_proc*sizeof(double)));
 
     double *dX_proc;
     double *dy_proc;
-
     checkCudaErrors(cudaMalloc((void **)&dX_proc, K*N_proc*sizeof(double)));
     checkCudaErrors(cudaMalloc((void **)&dy_proc, L*N_proc*sizeof(double)));
 
+
+    // Intialize vectors to hold info we need to Scatterv the X and y data.
     int X_sendcounts[num_procs];
     int X_displs[num_procs];
     int y_sendcounts[num_procs];
@@ -409,7 +423,8 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
         int num_batches = (N + batch_size - 1)/batch_size;
 
         for(int batch = 0; batch < num_batches; ++batch) {
-           
+            // Since the first batch has no previous loop to begin scattering X
+            // and y among the processes, we must treat it specially:           
             if(batch == 0)
             {
                 // Find the X and y values from this batch 
@@ -427,10 +442,10 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
                 // Find the sendcounts and displacements for each process
                 for(int i = 0; i < num_procs; i++)
                 {
-                    X_sendcounts[i] = (std::min((i + 1) * N_proc_next, N_batch_next) 
-                                    - i*N_proc_next)*K;
-                    y_sendcounts[i] = (std::min((i + 1) * N_proc_next, N_batch_next) 
-                                    - i*N_proc_next)*L;
+                    X_sendcounts[i] = (std::min((i + 1) * N_proc_next, 
+                                       N_batch_next) - i*N_proc_next)*K;
+                    y_sendcounts[i] = (std::min((i + 1) * N_proc_next, 
+                                       N_batch_next) - i*N_proc_next)*L;
                     X_displs[i] = i*N_proc_next*K;
                     y_displs[i] = i*N_proc_next*L;
                 }
@@ -439,19 +454,18 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
                             - rank*N_proc_next;
 
                 // Scatter this batch of X and y values to all processes
-                MPI_Iscatterv(X_batch, X_sendcounts, X_displs, MPI_DOUBLE, X_proc, 
-                             X_sendcounts[rank], MPI_DOUBLE, 0, MPI_COMM_WORLD,
-                             &X_req);
-
+                MPI_Iscatterv(X_batch, X_sendcounts, X_displs, MPI_DOUBLE, 
+                              X_proc, X_sendcounts[rank], MPI_DOUBLE, 0,
+                              MPI_COMM_WORLD, &X_req);
                  
-                MPI_Iscatterv(y_batch, y_sendcounts, y_displs, MPI_DOUBLE, y_proc, 
-                              y_sendcounts[rank], MPI_DOUBLE, 0, MPI_COMM_WORLD,
-                              &y_req);
+                MPI_Iscatterv(y_batch, y_sendcounts, y_displs, MPI_DOUBLE, 
+                              y_proc, y_sendcounts[rank], MPI_DOUBLE, 0,
+                              MPI_COMM_WORLD, &y_req);
             }
             N_batch = N_batch_next;
             N_proc = N_proc_next;
 
-            // Now prepare for the next scattering
+            // Now prepare for the scattering of the next batch:
             if(batch + 1 < num_batches)
             {
                 // Find the X and y values from the next batch 
@@ -469,10 +483,10 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
                 // Find the sendcounts and displacements for each process
                 for(int i = 0; i < num_procs; i++)
                 {
-                    X_sendcounts[i] = (std::min((i + 1) * N_proc_next, N_batch_next) 
-                                    - i*N_proc_next)*K;
-                    y_sendcounts[i] = (std::min((i + 1) * N_proc_next, N_batch_next) 
-                                    - i*N_proc_next)*L;
+                    X_sendcounts[i] = (std::min((i + 1) * N_proc_next, 
+                                       N_batch_next) - i*N_proc_next)*K;
+                    y_sendcounts[i] = (std::min((i + 1) * N_proc_next, 
+                                       N_batch_next) - i*N_proc_next)*L;
                     X_displs[i] = i*N_proc_next*K;
                     y_displs[i] = i*N_proc_next*L;
                 }
@@ -481,40 +495,46 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
                             - rank*N_proc_next;
             }
 
+            // Ensure we have X before we feed forward.
             MPI_Wait(&X_req, MPI_STATUS_IGNORE);
-            // Copy this batches X and y values to the device
             checkCudaErrors(cudaMemcpy(dX_proc, X_proc, K*N_proc*sizeof(double),
                                        cudaMemcpyHostToDevice));
 
-            // Feed forward and back propogate on the device
+            // Feed forward on the device
             myFeedForward(dCache, dX_proc, N_proc); 
 
+
+            // Ensure we have y before we back propogate.
             MPI_Wait(&y_req, MPI_STATUS_IGNORE);
             checkCudaErrors(cudaMemcpy(dy_proc, y_proc, L*N_proc*sizeof(double),
                                        cudaMemcpyHostToDevice));
 
+            // Back propogate on the device
             myBackPropogation(dCache, dX_proc, dy_proc, N_proc, reg);
-
 
             // Begin scattering for the next batch
             if(batch + 1 < num_batches)
             {
 
                 // Scatter this batch of X and y values to all processes
-                MPI_Iscatterv(X_batch, X_sendcounts, X_displs, MPI_DOUBLE, X_proc, 
-                             X_sendcounts[rank], MPI_DOUBLE, 0, MPI_COMM_WORLD,
-                             &X_req);
+                MPI_Iscatterv(X_batch, X_sendcounts, X_displs, MPI_DOUBLE, 
+                              X_proc, X_sendcounts[rank], MPI_DOUBLE, 0,
+                              MPI_COMM_WORLD, &X_req);
                  
-                MPI_Iscatterv(y_batch, y_sendcounts, y_displs, MPI_DOUBLE, y_proc, 
-                              y_sendcounts[rank], MPI_DOUBLE, 0, MPI_COMM_WORLD,
-                              &y_req);
+                MPI_Iscatterv(y_batch, y_sendcounts, y_displs, MPI_DOUBLE, 
+                              y_proc, y_sendcounts[rank], MPI_DOUBLE, 0,
+                              MPI_COMM_WORLD, &y_req);
             }
 
-            // Copy the gradients back to the host
+            // Now, we need to perform the Allreduce:
+            // Copy the first chunk of the gradients back to the device
             checkCudaErrors(cudaMemcpyAsync(gradients, dCache.gradients, 
-                  stream_lens[0]*sizeof(double), cudaMemcpyDeviceToHost, stream[0]));
+                  stream_lens[0]*sizeof(double), cudaMemcpyDeviceToHost, 
+                  stream[0]));
 
-            // Allreduce the gradients
+            // Cycle through the chunks, allreducing the current and copying it
+            // back to device while concurrently pulling down the next from
+            // device.
             for(int i = 0; i < num_streams; i++)
             {
                 // Wait for the previous stream to finish copying from host
@@ -524,6 +544,7 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
                                             stream_lens[i], 
                                             MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD,
                                             &s_req[i]));
+                // Pull down the next chunk if we are not on the last chunk
                 if(i + 1 != num_streams)
                 {
                     // Start the next stream copying from host
@@ -568,6 +589,8 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
             iter++;
         }
     }
+
+    // Cleanup
 
     checkCudaErrors(cudaFreeHost(X_proc));
     checkCudaErrors(cudaFreeHost(y_proc));
